@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Renamed SWELL -> GeoSWE (2026-07-17): one token for dist, repo, and import.
+# History: docs/dev/github-release-plan.md ("Naming").
+name = "geoswe"
+version = "1.0.0"
+description = "GeoSWE — Geophysical Shallow-Water Engine: a GPU flood solver with a NumPy CPU fallback."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Peng Chen", email = "pchen402@gatech.edu" }]
+keywords = [
+    "shallow-water-equations",
+    "flood-modeling",
+    "computational-fluid-dynamics",
+    "GPU",
+    "CuPy",
+    "finite-volume",
+    "HLLC",
+    "well-balanced",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Hydrology",
+    "Operating System :: POSIX :: Linux",
+]
+
+# NumPy is the only hard runtime dependency — the dense solver runs on the
+# pure-NumPy CPU backend. GPU/MPI/GIS stacks are opt-in extras.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+# GPU acceleration (dense + compressed solvers). [ctk] ships the CUDA headers CuPy
+# compiles against (the extra exists from CuPy 14), so the CUDA 12 build runs on CUDA 12
+# and CUDA 13 drivers without a system toolkit. Install one CuPy build, never both.
+gpu = ["cupy-cuda12x[ctk]>=14.0", "scipy>=1.10"]
+gpu-cuda13 = ["cupy-cuda13x[ctk]>=14.0", "scipy>=1.10"]   # the CUDA 13 build, if preferred
+mpi = ["mpi4py>=3.1"]                        # multi-GPU / distributed halo exchange
+io = ["rasterio>=1.3", "pyproj>=3.5"]        # GeoTIFF read/write + CRS transforms
+forcings = ["pandas>=2.0", "scipy>=1.10"]    # CSV rainfall/tide ingestion + case conditioning
+docs = [
+    "sphinx>=7",
+    "myst-parser>=2",
+    "furo",
+    "sphinx-copybutton",
+    "sphinx-design",
+]
+test = ["pytest>=7"]
+all = ["geoswe[gpu,mpi,io,forcings]"]
+
+[project.urls]
+Homepage = "https://github.com/GeoSWE/geoswe"
+Documentation = "https://geoswe.github.io/geoswe"
+Repository = "https://github.com/GeoSWE/geoswe"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["geoswe*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "gpu: needs a usable CUDA device; skipped automatically when none is visible (conftest.py)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["docs/dev", "benchmark"]   # benchmark/: research scripts, linted by hand
+
+[tool.ruff.lint]
+# Correctness only: undefined names, unused imports/variables, syntax. Style
+# rules are deliberately not enforced on a numerical code base with long kernels.
+select = ["F", "E9", "B006", "B008"]

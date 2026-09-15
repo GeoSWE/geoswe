@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use GeoSWE in your research, please cite it as below."
+title: "GeoSWE: Geophysical Shallow-Water Engine"
+abstract: >-
+  GeoSWE is a GPU-accelerated finite-volume solver for the 2D nonlinear
+  shallow-water equations, designed for flood modeling from coastal county to
+  continental scale. It combines HLLC/Lax-Friedrichs fluxes, well-balanced
+  surface reconstruction, implicit Manning friction, rainfall and coastal-stage
+  forcings, and a compressed active-cell mesh that reaches continental scale on
+  a single GPU node and scales across nodes with MPI.
+type: software
+authors:
+  - family-names: Chen
+    given-names: Peng
+    email: pchen402@gatech.edu
+    affiliation: "Georgia Institute of Technology"
+version: "1.0.0"
+date-released: "2026-09-14"
+license: BSD-3-Clause
+repository-code: "https://github.com/GeoSWE/geoswe"
+url: "https://geoswe.github.io/geoswe"
+keywords:
+  - shallow-water equations
+  - flood modeling
+  - GPU computing
+  - finite-volume method
+  - CuPy
+# Add a `preferred-citation:` block for the article once it is accepted
+# (title, authors, journal, year, doi), so citation tools prefer the paper.

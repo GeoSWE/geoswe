@@ -1,0 +1,9 @@
+# Documentation build dependencies (Read the Docs).
+# The package itself is installed separately (see .readthedocs.yaml); GPU/MPI/GIS
+# stacks are mocked in conf.py via autodoc_mock_imports, so they are NOT needed.
+sphinx>=7
+myst-parser>=2
+furo
+sphinx-copybutton
+sphinx-design
+numpy

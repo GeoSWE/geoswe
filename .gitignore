@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Docs build
+docs/_build/
+
+# Internal review notes / release planning: kept in the working tree, not published
+docs/dev/
+docs/api/_autosummary/
+
+# Example / run outputs
+examples/**/out/
+examples/**/*.png
+examples/**/frames_parallel/
+*.tif
+*.tiff
+
+# CuPy JIT kernel cache
+.cupy/
+cupy_cache/
+
+# Editor backups, test-monitor DB, pytest-benchmark output
+*.pre_*
+*.orig
+*.bak
+.pymon
+.benchmarks/
+
+# OS / editor
+.DS_Store
+.vscode/
+*.swp
+
+# NOTE: the small bundled real-data case under examples/data/ IS tracked on
+# purpose (it is the quickstart). Large user data should live outside the repo.
+
+# Benchmark cases (benchmark/README.md): sheetflow_plane, pinellas_3m and
+# scaling_640m ship; the Florida and CONUS application pipelines are held back
+# from this release.
+
+# Benchmark run outputs
+benchmark/**/*.npz
+benchmark/**/*.png
+benchmark/**/*.csv
+benchmark/**/*.log
+benchmark/**/results_*/
+benchmark/**/out/
+PUSH_INSTRUCTIONS.md
