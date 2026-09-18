@@ -1633,8 +1633,15 @@ class Solver2D:
         elif getattr(self, "_rain_in_kernel", False):
             ok, why = False, "in-kernel rain gather (SWE_RAIN_GATHER=1)"
         else:
-            _rr = self._rainfall_rate_now()
-            if _rr is not None and not (hasattr(_rr, "ndim") and _rr.ndim == 2):
+            # The rain kind (none, scalar, 2-D) belongs to the configured forcing, so check it
+            # once per forcing: _rainfall_rate_now() gathers a full spatial field, and doing it
+            # here every step doubled the rain gathers of the fused path.
+            _rk = (id(cfg.rainfall_forcing), cfg.rainfall)
+            if getattr(self, "_dfs_rain_key", None) != _rk:
+                _rr = self._rainfall_rate_now()
+                self._dfs_rain_key = _rk
+                self._dfs_rain_scalar = _rr is not None and not (hasattr(_rr, "ndim") and _rr.ndim == 2)
+            if self._dfs_rain_scalar:
                 ok, why = False, "scalar rainfall rate (split path)"
         if not getattr(self, "_dfs_said", False):
             self._dfs_said = True
