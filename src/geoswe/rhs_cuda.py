@@ -2142,10 +2142,33 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
                  + _DFSTEP_CFL_LAM.replace("(ny - 2*ngh)", "(nyp - 2*ngh)") + _DFSTEP_CFL_REDUCE + "}\n"))
     assert "dense_carry_outside_cfl" in _DENSE_CARRY_CFL_SRC and _DENSE_CARRY_CFL_SRC.count("return;") == 0
 
-    def build_dense_carry_kernel(wetdry_keep_h, cfl=False, force=False):
+    # Listed carry (GEOSWE_DENSE_CARRY_ACTIVE=1): the same per-cell body over an index list of the
+    # carried cells that can change, instead of a 2-D launch over the whole padded grid.
+    _CARRY_PRO_OLD = ("    const int j = blockIdx.x * blockDim.x + threadIdx.x;\n"
+                      "    const int i = blockIdx.y * blockDim.y + threadIdx.y;\n"
+                      "    if (i >= nxp || j >= nyp) return;\n    const int idx = i * nyp + j;\n"
+                      "    // written by the fused compact launch: inside_mask != 0 within [2, n-3] (= _get_compact_inside_idx)\n"
+                      "    if ((!have_mask || inmask[idx] != 0) && i >= 2 && i < nxp - 2 && j >= 2 && j < nyp - 2) return;")
+    _CARRY_PRO_LIST = ("    const int _k = blockIdx.x * blockDim.x + threadIdx.x;\n"
+                       "    if (_k >= n_list) return;\n"
+                       "    const int idx = clist[_k];\n"
+                       "    const int i = idx / nyp;\n"
+                       "    const int j = idx - i * nyp;")
+    _CARRY_PRO_CFL_OLD = ("    const int j = blockIdx.x * blockDim.x + threadIdx.x;\n"
+                          "    const int i = blockIdx.y * blockDim.y + threadIdx.y;\n"
+                          "    __shared__ float _smax[1024];\n    float _lam = 0.0f;\n"
+                          "    bool _skip = (i >= nxp || j >= nyp);\n    const int idx = _skip ? 0 : i * nyp + j;\n"
+                          "    if (!_skip && (!have_mask || inmask[idx] != 0) && i >= 2 && i < nxp - 2 && j >= 2 && j < nyp - 2) _skip = true;\n    if (!_skip) {")
+    _CARRY_PRO_CFL_LIST = ("    const int _k = blockIdx.x * blockDim.x + threadIdx.x;\n"
+                           "    __shared__ float _smax[1024];\n    float _lam = 0.0f;\n"
+                           "    bool _skip = (_k >= n_list);\n    const int idx = _skip ? 0 : clist[_k];\n"
+                           "    const int i = idx / nyp;\n    const int j = idx - i * nyp;\n    if (!_skip) {")
+
+    def build_dense_carry_kernel(wetdry_keep_h, cfl=False, force=False, listed=False):
         """Carry kernel for the cells outside the compact list; force=True appends the step
-        forcings as in build_dense_fstep_kernel (exclusive with cfl)."""
-        key = ("carry", bool(cfl), bool(force))
+        forcings as in build_dense_fstep_kernel; listed=True runs over an index list (last two
+        arguments clist, n_list) with a 1-D launch."""
+        key = ("carry", bool(cfl), bool(force), bool(listed))
         if key not in _dfstep_kernels:
             src = (_DENSE_CARRY_CFL_SRC if cfl else _DENSE_CARRY_SRC).replace("__WETDRY_KEEP_H__", str(int(wetdry_keep_h)))
             name = "dense_carry_outside_cfl" if cfl else "dense_carry_outside"
@@ -2165,6 +2188,16 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
                     _dl = src.index("\n") + 1                     # after '#define WETDRY_KEEP_H'
                     src = src[:_dl] + _IN_LIST_FN + src[_dl:]
                 name = name + "_frc"
+            if listed:
+                pro_old, pro_new = ((_CARRY_PRO_CFL_OLD, _CARRY_PRO_CFL_LIST) if cfl
+                                    else (_CARRY_PRO_OLD, _CARRY_PRO_LIST))
+                _body = src.index("\n{\n")                      # end of the signature
+                if src.count(pro_old) != 1 or src[:_body].rstrip()[-1] != ")":
+                    raise RuntimeError("dense carry listed: anchor not found")
+                _sig_end = src.rindex(")", 0, _body)
+                src = (src[:_sig_end] + ",\n    const int* __restrict__ clist, const int n_list"
+                       + src[_sig_end:]).replace(pro_old, pro_new).replace(f"void {name}(", f"void {name}_lst(")
+                name = name + "_lst"
             _dfstep_kernels[key] = cp.RawKernel(src, name)
         return _dfstep_kernels[key]
 

@@ -1600,6 +1600,68 @@ class Solver2D:
         """
         self._step_forcings = spec
 
+    def _build_carry_list(self, have_mask, fcfl, h_cfl):
+        """After a full carry: list the carried cells that can still change (ghosts, cells the
+        caller's forcings touch, moving cells, and any cell whose two buffers differ), and the
+        constant lambda of the rest. Called once, right after the buffer swap."""
+        import cupy as cp  # type: ignore
+        from . import rhs_cuda as R
+        spec = self._step_forcings
+        new, old = self.q, self._rhs_buf
+        nxp, nyp = new.shape[1], new.shape[2]
+        ngh = self.mesh.ngh
+        nx, ny = nxp - 2 * ngh, nyp - 2 * ngh
+        inm = (self.inside_mask != 0) if have_mask else cp.ones((nxp, nyp), bool)
+        compact = cp.zeros((nxp, nyp), bool)
+        compact[2:nxp - 2, 2:nyp - 2] = inm[2:nxp - 2, 2:nyp - 2]
+        interior = cp.zeros((nxp, nyp), bool)
+        interior[ngh:nxp - ngh, ngh:nyp - ngh] = True
+        mod = cp.zeros((nxp, nyp), bool)
+        rm = spec.get("ring_mask")
+        if rm is not None:
+            mod[ngh:nxp - ngh, ngh:nyp - ngh] |= rm.reshape(nx, ny).astype(bool)
+        ci = spec.get("clamp_idx")
+        if ci is not None and int(ci.size):
+            mod.ravel()[ci] = True
+        # A carried cell gets no fluxes and no rain, so a dry one stays dry: infiltration and drains
+        # act only on wet cells, and the sponge (h*k + a) leaves a dry cell with a = 0 unchanged.
+        wet = new[0] > 0
+        sp = spec.get("sponge")
+        if sp is not None:
+            band = cp.zeros((nxp, nyp), bool)
+            if sp["do_x"]:
+                band[int(sp["x0"]):int(sp["x0"]) + int(sp["w"]), :] = True
+            if sp["do_y"]:
+                band[:, int(sp["y0"]):int(sp["y0"]) + int(sp["w"])] = True
+            mod |= band & (wet | (sp["amb"] != 0))
+            del band
+        gd = spec.get("gd")
+        if gd is not None:
+            if gd.get("cls") is not None and gd.get("Ks") is not None:
+                mod |= (gd["Ks"][gd["cls"]] > 0) & wet
+            if gd.get("inv_tau") is not None:
+                mod |= (gd["inv_tau"] > 0) & wet
+        nv, ov = new.view(cp.uint32), old.view(cp.uint32)
+        same = (nv[0] == ov[0]) & (nv[1] == ov[1]) & (nv[2] == ov[2])
+        at_rest = (new[1] == 0) & (new[2] == 0)
+        static = ~compact & interior & ~mod & same & at_rest
+        self._carry_list = cp.flatnonzero((~compact & ~static).ravel()).astype(cp.int32)
+        n_static = int(static.sum())
+        self._carry_static_bits = 0
+        if fcfl and n_static:
+            sidx = cp.flatnonzero(static.ravel()).astype(cp.int32)
+            bits = cp.zeros(1, cp.uint32)
+            R.build_cells_lam_kernel()(((n_static + 255) // 256,), (256,),
+                                       (new[0], new[1], new[2], sidx, np.int32(n_static),
+                                        np.float32(self.cfg.g), h_cfl, bits))
+            self._carry_static_bits = int(bits.get()[0])
+            del sidx
+        if self.comm is None or self.comm.rank == 0:
+            print(f"  [dense] listed carry: {int(self._carry_list.size):,} carried cells can change, "
+                  f"{n_static:,} static cells skipped", flush=True)
+        del compact, interior, mod, same, at_rest, static, wet
+        cp.get_default_memory_pool().free_all_blocks()
+
     def fold_cells_into_next_cfl(self, cells):
         """Add the current lambda of ``cells`` (padded linear indices, int32) to the next step's
         CFL reduction when the fused step with forcings reduced it (set_step_forcings cfl=True)."""
@@ -1746,6 +1808,13 @@ class Solver2D:
                 frc = frc + ((_ci, np.int32(int(_ci.size))) if _ci is not None
                              else (self._frc_clamp_dummy, np.int32(0)))
         frc_extra = frc if force else ()
+        # Listed carry (GEOSWE_DENSE_CARRY_ACTIVE=1, with step forcings): after one full carry,
+        # the carried cells that nothing can change (no fluxes, no rain, at rest, untouched by the
+        # caller's forcings) hold the same bits in both buffers and are skipped; see
+        # _build_carry_list. Their lambda is constant and seeds the fused reduction.
+        use_list = (force and os.environ.get("GEOSWE_DENSE_CARRY_ACTIVE", "0") == "1"
+                    and not getattr(self, "_inflows", None) and cfg.stage_boundary is None)
+        clist = getattr(self, "_carry_list", None) if use_list else None
         kern = R.build_dense_fstep_kernel(no_sigma, int(_WETDRY_KEEP_H), cfl=fcfl, storage=storage, curve=curve,
                                           force=force)
         carry = R.build_dense_carry_kernel(int(_WETDRY_KEEP_H), cfl=fcfl, force=force)
@@ -1753,7 +1822,7 @@ class Solver2D:
         if fcfl:
             if not hasattr(self, "_cfl_out_bits"):
                 self._cfl_out_bits = cp.zeros(1, dtype=cp.uint32)
-            self._cfl_out_bits.fill(0)
+            self._cfl_out_bits.fill(int(getattr(self, "_carry_static_bits", 0)) if clist is not None else 0)
             h_cfl = cfg.h_min_cfl if cfg.h_min_cfl > 0.0 else cfg.h_min
             if q.dtype == np.float32 and h_cfl < 1.0e-6:
                 h_cfl = 1.0e-6
@@ -1810,15 +1879,23 @@ class Solver2D:
         else:
             launch(*R._get_compact_inside_idx(self.inside_mask))
             _have_mask = 1
-        block = (32, 8)
-        grid = ((nyp + block[0] - 1) // block[0], (nxp + block[1] - 1) // block[1])
-        carry(grid, block,
-              (q[0], q[1], q[2], qn[0], qn[1], qn[2], _inmask, np.int32(_have_mask), self._dfs_rzero,
-               nf, ncls, ntab, np.int32(int(have_mtab)), self._max_h, np.int32(1),
-               np.int32(nxp), np.int32(nyp), np.int32(ngh), np.float32(dt), np.float32(cfg.g),
-               np.float32(cfg.h_min), vcap, uq) + cfl_extra + frc_extra)
+        carry_args = ((q[0], q[1], q[2], qn[0], qn[1], qn[2], _inmask, np.int32(_have_mask), self._dfs_rzero,
+                       nf, ncls, ntab, np.int32(int(have_mtab)), self._max_h, np.int32(1),
+                       np.int32(nxp), np.int32(nyp), np.int32(ngh), np.float32(dt), np.float32(cfg.g),
+                       np.float32(cfg.h_min), vcap, uq) + cfl_extra + frc_extra)
+        if clist is not None:
+            n_l = int(clist.size)
+            if n_l:
+                R.build_dense_carry_kernel(int(_WETDRY_KEEP_H), cfl=fcfl, force=force, listed=True)(
+                    ((n_l + 255) // 256,), (256,), carry_args + (clist, np.int32(n_l)))
+        else:
+            block = (32, 8)
+            grid = ((nyp + block[0] - 1) // block[0], (nxp + block[1] - 1) // block[1])
+            carry(grid, block, carry_args)
         self._step_forcings_done = force
         self.q, self._rhs_buf = qn, q
+        if use_list and clist is None:
+            self._build_carry_list(_have_mask, fcfl, cfl_extra[1] if fcfl else None)
         if frc_cfl:
             self._lam_pending = True          # read in cfl_dt, after the caller's clamp cells are folded in
             self._frc_h_cfl = cfl_extra[1]
