@@ -99,6 +99,14 @@ def build_parser(extra=None):
                          "(byte-identical). Set e.g. 1e-3 to drop near-dry films from dt while "
                          "physics keeps the small --h-min (e.g. 1e-6). Tests whether dt can be "
                          "cheaper without breaking the burned-channel stage calibration.")
+    ap.add_argument("--storage-courant", type=float, default=0.0,
+                    help="Storage curve for --channel-width-npz: the 1/sigma storage scaling holds "
+                         "up to the depth h* where still water reaches this storage-scaled Courant "
+                         "number (e.g. 0.9); above h* the whole cell stores water. Keeps deep "
+                         "narrow-channel cells stable without a smaller time step. 0 (default) "
+                         "= plain 1/sigma, as in the calibrated runs.")
+    ap.add_argument("--storage-dt-ref", type=float, default=0.0,
+                    help="Time step (s) that sets h* for --storage-courant; 0 = the first step's dt.")
     if extra:
         extra(ap)
     return ap

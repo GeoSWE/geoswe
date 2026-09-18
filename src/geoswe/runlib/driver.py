@@ -270,18 +270,31 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
                 f"{native_rate.shape[1]}×{native_rate.shape[2]} pixels; "
                 f"local lookup {lookup_loc.shape}")
 
+            # GEOSWE_RAIN_FRAME_CACHE=1: keep the gathered field of the current frame (frames hold
+            # between their times, so it changes only at frame boundaries) instead of gathering it
+            # every step. Same values; costs one resident 4 B/cell field, so it is opt-in.
+            _rain_cache = os.environ.get("GEOSWE_RAIN_FRAME_CACHE", "0") == "1"
+
             class _SpatialRainfallNative:
-                __slots__ = ("time_s", "_t_list", "_rate_dev", "_lookup_dev")
+                __slots__ = ("time_s", "_t_list", "_rate_dev", "_lookup_dev", "_cache_i", "_cache")
                 def __init__(self, ts, rate_dev, lookup_dev):
                     self.time_s = np.asarray(ts, dtype=np.float64)
                     self._t_list = list(self.time_s.tolist())
                     self._rate_dev = rate_dev
                     self._lookup_dev = lookup_dev
+                    self._cache_i = -1
+                    self._cache = None
                 def rate_at_time(self, t):
                     import bisect
                     i = max(0, bisect.bisect_right(self._t_list, float(t)) - 1)
                     i = min(i, len(self._t_list) - 1)
-                    return self._rate_dev[i][self._lookup_dev]
+                    if not _rain_cache:
+                        return self._rate_dev[i][self._lookup_dev]
+                    if i != self._cache_i:
+                        self._cache = None                  # release the old field before the gather
+                        self._cache = self._rate_dev[i][self._lookup_dev]
+                        self._cache_i = i
+                    return self._cache
 
             rain = _SpatialRainfallNative(t_s_sr, native_rate_dev, lookup_dev)
         else:
@@ -331,6 +344,8 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
                            os.environ.get("SWE_FRICTION_QUAD", "1")) != "0"),
         manning_field=None,   # Manning supplied as a class table via set_manning_table
         rainfall_forcing=rain,
+        storage_courant=float(getattr(args, "storage_courant", 0.0) or 0.0),
+        storage_dt_ref=float(getattr(args, "storage_dt_ref", 0.0) or 0.0),
         # h_min default (flag absent) is the validated 1e-6/1e-10 -> byte-identical to the
         # calibrated runs. --h-min 1e-3 opts into the 1mm CFL/wet-dry floor (~2x larger dt);
         # composites must be re-verified when set.
@@ -1207,6 +1222,9 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
     # above, then runs the flat (N_active) step loop in geoswe.compressed_solver instead of
     # the dense loop below. Flag off (default) -> the dense path is byte-for-byte unchanged. ----
     if args.compressed:
+        if float(getattr(args, "storage_courant", 0.0) or 0.0) > 0.0:
+            raise SystemExit("--storage-courant is implemented on the dense path only; drop --compressed "
+                             "or the storage curve")
         from ..compressed_solver import CompressedSolver
         _L = locals()
         nxp_loc = Nx_loc + 2*ngh; nyp_loc = Ny_loc + 2*ngh

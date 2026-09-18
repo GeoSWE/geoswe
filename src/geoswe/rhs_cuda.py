@@ -1827,9 +1827,48 @@ void dense_carry_outside(
         "        if (_t == 0 && _smax[0] > 0.0f) atomicMax(cfl_bits, __float_as_uint(_smax[0]));\n"
         "    }\n")
 
-    def build_dense_fstep_kernel(no_sigma, wetdry_keep_h, cfl=False):
-        """Compact SRM-HLLC fp32 kernel with the update fused in (see above)."""
-        key = ("fstep", bool(no_sigma), bool(cfl))
+    # ---- sub-grid channel storage in the fused step (Solver2D.set_storage_fraction) ----
+    # The split path integrates h with axpy_sigma, q_out = q_in + dt * r * inv_s, after the rain
+    # add; the fused tail applies the same expression to the same register values. storage=False
+    # leaves the kernel source unchanged.
+    _DFSTEP_H_UPDATE_OLD = "        float h  = q0[idx] + dt * rr0;\n"
+    _DFSTEP_H_UPDATE_STO = "        float h  = q0[idx] + dt * rr0 * inv_sig[idx];\n"
+    _DFSTEP_STO_SIG_EXTRA = ",\n    const __T__* __restrict__ inv_sig)"
+    # Storage curve (Config.storage_courant > 0): the 1/sigma scaling holds up to the depth
+    # h* = sto_k * sigma^2; above it the whole cell stores water. The update runs in volume form
+    # v = sigma*min(h, h*) + max(h - h*, 0), so mass is exact, and a cell that stays below h*
+    # keeps the plain expression above bit for bit.
+    _DFSTEP_CURVE_SIG_EXTRA = ",\n    const __T__* __restrict__ inv_sig, const __T__ sto_k)"
+    _DFSTEP_H_UPDATE_CURVE = (
+        _DFSTEP_H_UPDATE_STO +
+        "        {\n"
+        "            const float isg = inv_sig[idx];\n"
+        "            if (isg > 1.0f) {\n"
+        "                const float sg = 1.0f / isg;\n"
+        "                const float hst = sto_k * sg * sg;\n"
+        "                const float h0 = q0[idx];\n"
+        "                if (h > hst || h0 > hst) {\n"
+        "                    const float vst = sg * hst;\n"
+        "                    const float v0 = (h0 > hst) ? (vst + (h0 - hst)) : sg * h0;\n"
+        "                    const float v1 = v0 + dt * rr0;\n"
+        "                    h = (v1 > vst) ? (hst + (v1 - vst)) : v1 * isg;\n"
+        "                }\n"
+        "            }\n"
+        "        }\n")
+
+    def _dfstep_storage(sig_new, tail_new, curve=False):
+        if tail_new.count(_DFSTEP_H_UPDATE_OLD) != 1:
+            raise RuntimeError("dense fused-step storage: h-update anchor count != 1")
+        extra, upd = ((_DFSTEP_CURVE_SIG_EXTRA, _DFSTEP_H_UPDATE_CURVE) if curve
+                      else (_DFSTEP_STO_SIG_EXTRA, _DFSTEP_H_UPDATE_STO))
+        return sig_new[:-1] + extra, tail_new.replace(_DFSTEP_H_UPDATE_OLD, upd)
+
+    def build_dense_fstep_kernel(no_sigma, wetdry_keep_h, cfl=False, storage=False, curve=False):
+        """Compact SRM-HLLC fp32 kernel with the update fused in (see above). storage=True adds
+        the per-cell 1/sigma of sub-grid channel storage to the h update (last argument);
+        curve=True also applies the storage curve (arguments inv_sig, sto_k)."""
+        curve = bool(storage and curve)
+        key = ("fstep", bool(no_sigma), bool(cfl), bool(storage), curve)
         if key in _dfstep_kernels:
             return _dfstep_kernels[key]
         src = _FUSED_RHS_WB_SRM_HLLC_COMPACT_SRC
@@ -1843,6 +1882,8 @@ void dense_carry_outside(
                 "        if (have_max && h > max_h[idx]) max_h[idx] = h;\n" + _DFSTEP_CFL_LAM + "    }\n")
                 + _DFSTEP_CFL_REDUCE)
             assert tail_new != _DFSTEP_TAIL_NEW + _DFSTEP_CFL_REDUCE
+        if storage:
+            sig_new, tail_new = _dfstep_storage(sig_new, tail_new, curve)
         for old, new, tag in [(_DFSTEP_SIG_OLD, sig_new, "signature"),
                               (_DFSTEP_TAIL_OLD, tail_new, "tail")]:
             if src.count(old) != 1:
@@ -1855,7 +1896,7 @@ void dense_carry_outside(
             if "return;" in src.split("__global__", 1)[1].split("{", 1)[1]:
                 raise RuntimeError("dense fused-step-cfl: unexpected 'return;' left in kernel body")
         kname = ("fused_rhs_wb_srm_hllc_compact_fstep" + ("cfl" if cfl else "") + "_"
-                 + ("ns_" if no_sigma else "") + "fp32")
+                 + (("stc_" if curve else "sto_") if storage else "") + ("ns_" if no_sigma else "") + "fp32")
         s = (_hybrid_prefix() + f"#define WETDRY_KEEP_H {int(wetdry_keep_h)}\n"
              + _maybe_dry_skip(src).replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
                .replace("__T__", "float").replace("__KNAME__", kname))
@@ -1878,21 +1919,27 @@ void dense_carry_outside(
                          "    }\n")
     _DFSTEP2D_PRE_NEW = "    if (have_mask && inside_mask[idx] == 0) return;   // carried by dense_carry_outside\n"
 
-    def build_dense_fstep2d_kernel(no_sigma, wetdry_keep_h):
-        """2-D SRM-HLLC fp32 kernel with the update fused in (no compact list)."""
-        key = ("fstep2d", bool(no_sigma))
+    def build_dense_fstep2d_kernel(no_sigma, wetdry_keep_h, storage=False, curve=False):
+        """2-D SRM-HLLC fp32 kernel with the update fused in (no compact list); storage and
+        curve as in build_dense_fstep_kernel."""
+        curve = bool(storage and curve)
+        key = ("fstep2d", bool(no_sigma), bool(storage), curve)
         if key in _dfstep_kernels:
             return _dfstep_kernels[key]
         src = _FUSED_RHS_WB_SRM_HLLC_SRC
         if no_sigma:
             src = _no_sigma_src(src)
-        for old, new, tag in [(_DFSTEP2D_SIG_OLD, _DFSTEP2D_SIG_NEW, "signature"),
+        sig2d, tail2d = _DFSTEP2D_SIG_NEW, _DFSTEP_TAIL_NEW
+        if storage:
+            sig2d, tail2d = _dfstep_storage(sig2d, tail2d, curve)
+        for old, new, tag in [(_DFSTEP2D_SIG_OLD, sig2d, "signature"),
                               (_DFSTEP2D_PRE_OLD, _DFSTEP2D_PRE_NEW, "preamble"),
-                              (_DFSTEP_TAIL_OLD, _DFSTEP_TAIL_NEW, "tail")]:
+                              (_DFSTEP_TAIL_OLD, tail2d, "tail")]:
             if src.count(old) != 1:
                 raise RuntimeError(f"dense fused-step-2d port: '{tag}' anchor count != 1")
             src = src.replace(old, new)
-        kname = "fused_rhs_wb_srm_hllc_fstep2d_" + ("ns_" if no_sigma else "") + "fp32"
+        kname = ("fused_rhs_wb_srm_hllc_fstep2d_" + (("stc_" if curve else "sto_") if storage else "")
+                 + ("ns_" if no_sigma else "") + "fp32")
         s2 = (_hybrid_prefix() + f"#define WETDRY_KEEP_H {int(wetdry_keep_h)}\n"
               + _maybe_dry_skip(src).replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
                 .replace("__T__", "float").replace("__KNAME__", kname))

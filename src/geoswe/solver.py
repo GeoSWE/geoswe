@@ -325,6 +325,12 @@ def _dense_fuse_forcings():
     return os.environ.get("SWE_FUSE_FORCINGS", "1") == "1"   # default ON since 2026-08 (quad default; fused==split verified bitwise)
 
 
+def _dense_fuse_storage():
+    # GEOSWE_DENSE_FUSE_STORAGE=1 (default): runs with sub-grid channel storage take the dense
+    # fused step too (build_dense_fstep_kernel(storage=True)); 0 keeps them on the split path.
+    return os.environ.get("GEOSWE_DENSE_FUSE_STORAGE", "1") == "1"
+
+
 def _warn_unsupported_env():
     """Research-tree knobs this release does not implement.
 
@@ -601,6 +607,17 @@ class Config:
     # +1.5% of the analytic film profile, linearized +7-9% thick; +0.5-0.7% steps).
     # GEOSWE_FRICTION_QUAD=0 / SWE_FRICTION_QUAD=0 restores the linearized root.
     friction_quadratic_alpha: bool = True
+    # Storage curve for sub-grid channel storage (Solver2D.set_storage_fraction). With the
+    # time step left free of 1/sigma, a deep storage cell can reach a storage-scaled Courant
+    # number lam*dt/(sigma*dx) above 1 and the explicit update then blows up. With
+    # storage_courant = C > 0 the 1/sigma scaling holds only up to the depth
+    # h* = (C * sigma * dx / dt_ref)**2 / g at which still water reaches Courant number C;
+    # above h* the whole cell stores water, as in a flooded floodplain. The curve is fixed per
+    # cell, so mass is exact, and a cell that stays below h* is updated exactly as without it.
+    # 0 disables the curve (plain 1/sigma at every depth).
+    storage_courant: float = 0.0
+    # Time step that sets h*; 0 takes the first step's dt (the ocean-limited CFL step).
+    storage_dt_ref: float = 0.0
     rainfall: float = 0.0  # spatially uniform rainfall rate (m/s) — legacy scalar
     # Optional time-varying / spatially-varying rainfall forcing
     # (overrides scalar rainfall if set). Must be a RainfallForcing instance
@@ -1316,6 +1333,26 @@ class Solver2D:
                     'T q_in, T dt, T r, T inv_s', 'T q_out',
                     'q_out = q_in + dt * r * inv_s',
                     'axpy_sigma')
+            if not hasattr(self, "_axpy_sigma_curve_kernel"):
+                # Config.storage_courant > 0: same update with the storage curve (see
+                # build_dense_fstep_kernel(curve=True), which it mirrors).
+                self._axpy_sigma_curve_kernel = cp.ElementwiseKernel(
+                    'T q_in, T dt, T r, T inv_s, T k', 'T q_out',
+                    """
+                    T h = q_in + dt * r * inv_s;
+                    if (inv_s > (T)1) {
+                        const T sg = (T)1 / inv_s;
+                        const T hst = k * sg * sg;
+                        if (h > hst || q_in > hst) {
+                            const T vst = sg * hst;
+                            const T v0 = (q_in > hst) ? (vst + (q_in - hst)) : sg * q_in;
+                            const T v1 = v0 + dt * r;
+                            h = (v1 > vst) ? (hst + (v1 - vst)) : v1 * inv_s;
+                        }
+                    }
+                    q_out = h;
+                    """,
+                    'axpy_sigma_curve')
 
     def _apply_bc(self):
         if self.halo is None:
@@ -1551,9 +1588,27 @@ class Solver2D:
         else:
             sb.apply(self.q, self.t, h_min=self.cfg.h_min)
 
+    def _storage_curve_k(self, dt):
+        """sto_k of the storage curve (h* = sto_k * sigma**2), fixed at the first call; None when
+        the curve is off or no storage is set."""
+        cfg = self.cfg
+        if getattr(self, "_storage_inv_sigma", None) is None or not (cfg.storage_courant > 0.0):
+            return None
+        k = getattr(self, "_storage_k", None)
+        if k is None:
+            dt_ref = cfg.storage_dt_ref if cfg.storage_dt_ref > 0.0 else float(dt)
+            dxm = min(self.mesh.dx, self.mesh.dy)
+            k = (cfg.storage_courant * dxm / dt_ref) ** 2 / cfg.g
+            self._storage_k = k
+            if self.comm is None or self.comm.rank == 0:
+                print(f"  storage curve: C={cfg.storage_courant:g}, dt_ref={dt_ref:.4f} s -> "
+                      f"h* = {k:.2f} m x sigma^2 (h* = {k * 0.09:.2f} m at sigma 0.3)", flush=True)
+        return k
+
     def _dense_fstep_ok(self):
         """SWE_DENSE_FUSE_STEP=1 and this configuration is the compact SRM-HLLC fp32 path
-        with table Manning, no sigma-storage and no in-kernel rain (else the split path)."""
+        with table Manning and no in-kernel rain (else the split path). Sub-grid channel
+        storage is fused too unless GEOSWE_DENSE_FUSE_STORAGE=0."""
         if getattr(self, "_dense_fstep", None) is None:
             self._dense_fstep = os.environ.get("SWE_DENSE_FUSE_STEP", "1") == "1"
             # SWE_DENSE_FUSE_CFL=1: the fused kernels also reduce the next step's CFL lambda
@@ -1571,8 +1626,8 @@ class Solver2D:
         ok, why = True, ""
         if not (cfg.flux == "hllc" and cfg.well_balanced and cfg.wb_method == "srm" and _HAS_FUSED_RHS):
             ok, why = False, "not the SRM-HLLC path (flux/wb)"
-        elif getattr(self, "_storage_inv_sigma", None) is not None:
-            ok, why = False, "sigma-storage active"
+        elif getattr(self, "_storage_inv_sigma", None) is not None and not _dense_fuse_storage():
+            ok, why = False, "sigma-storage active (GEOSWE_DENSE_FUSE_STORAGE=0)"
         elif not self._fused_forcings_eligible():
             ok, why = False, "fused forcings not eligible (friction/manning/dtype)"
         elif getattr(self, "_rain_in_kernel", False):
@@ -1585,6 +1640,8 @@ class Solver2D:
             self._dfs_said = True
             if self.comm is None or self.comm.rank == 0:
                 _how = ("one compact launch" if self.inside_mask is not None else "one 2-D launch (no inside mask)")
+                if getattr(self, "_storage_inv_sigma", None) is not None:
+                    _how += ", sub-grid channel storage included"
                 print("  [dense] SWE_DENSE_FUSE_STEP=1: " + ("residual+update fused into " + _how +
                       " (state double-buffered in the residual buffer)" if ok else "NOT engaged -> " + why), flush=True)
         return ok
@@ -1612,8 +1669,14 @@ class Solver2D:
         nxp, nyp = q.shape[1], q.shape[2]
         ngh = self.mesh.ngh
         no_sigma = bool(getattr(self, "_no_sigma_rhs", False))
-        fcfl = bool(getattr(self, "_dense_fcfl", False))
-        kern = R.build_dense_fstep_kernel(no_sigma, int(_WETDRY_KEEP_H), cfl=fcfl)
+        inv_sig = getattr(self, "_storage_inv_sigma", None)
+        storage = inv_sig is not None
+        # the fused lambda reduction has no 1/sigma term, so storage runs keep the separate CFL pass
+        fcfl = bool(getattr(self, "_dense_fcfl", False)) and not storage
+        sto_k = self._storage_curve_k(dt) if storage else None
+        curve = sto_k is not None
+        sto_extra = ((inv_sig, np.float32(sto_k)) if curve else (inv_sig,)) if storage else ()
+        kern = R.build_dense_fstep_kernel(no_sigma, int(_WETDRY_KEEP_H), cfl=fcfl, storage=storage, curve=curve)
         carry = R.build_dense_carry_kernel(int(_WETDRY_KEEP_H), cfl=fcfl)
         cfl_extra = ()
         if fcfl:
@@ -1655,17 +1718,17 @@ class Solver2D:
                  (q[0], q[1], q[2], self.sigma, self.b, qn[0], qn[1], qn[2],
                   np.int32(nxp), np.int32(nyp), np.float32(1.0 / self.mesh.dx),
                   np.float32(1.0 / self.mesh.dy), np.float32(cfg.g), np.float32(cfg.h_min),
-                  idx, np.int32(n), qn[0], qn[1], qn[2]) + rain_args + common)
+                  idx, np.int32(n), qn[0], qn[1], qn[2]) + rain_args + common + sto_extra)
         if self.inside_mask is None:
             # 2-D launch over the padded grid (the full-rectangle path has no compact list); the
             # halo exchange was blocking in _apply_bc, so there is no interior/band split here.
-            k2 = R.build_dense_fstep2d_kernel(no_sigma, int(_WETDRY_KEEP_H))
+            k2 = R.build_dense_fstep2d_kernel(no_sigma, int(_WETDRY_KEEP_H), storage=storage, curve=curve)
             b2 = (16, 16)
             g2 = ((nxp + b2[0] - 1) // b2[0], (nyp + b2[1] - 1) // b2[1])
             k2(g2, b2, (q[0], q[1], q[2], self.sigma, self.b, qn[0], qn[1], qn[2],
                         np.int32(nxp), np.int32(nyp), np.float32(1.0 / self.mesh.dx),
                         np.float32(1.0 / self.mesh.dy), np.float32(cfg.g), np.float32(cfg.h_min),
-                        self._dfs_dummy_u, np.int32(0), qn[0], qn[1], qn[2]) + rain_args + common)
+                        self._dfs_dummy_u, np.int32(0), qn[0], qn[1], qn[2]) + rain_args + common + sto_extra)
             _have_mask = 0
         elif getattr(self, "_ovl_handle", None) is not None:
             _int, _band = self._ovl_lists()
@@ -2111,8 +2174,14 @@ class Solver2D:
                     self._fused_forcings_done = True
                 elif _inv_sigma is not None:
                     # h: per-cell scaled axpy: h += dt * rhs[0] * inv_sigma
-                    self._axpy_sigma_kernel(
-                        self.q[0], self.q.dtype.type(dt), rhs[0], _inv_sigma, self.q[0])
+                    _sk = self._storage_curve_k(dt)
+                    if _sk is None:
+                        self._axpy_sigma_kernel(
+                            self.q[0], self.q.dtype.type(dt), rhs[0], _inv_sigma, self.q[0])
+                    else:
+                        self._axpy_sigma_curve_kernel(
+                            self.q[0], self.q.dtype.type(dt), rhs[0], _inv_sigma,
+                            self.q.dtype.type(_sk), self.q[0])
                     # hu, hv: standard axpy
                     self._axpy_kernel(self.q[1], self.q.dtype.type(dt), rhs[1], self.q[1])
                     self._axpy_kernel(self.q[2], self.q.dtype.type(dt), rhs[2], self.q[2])
