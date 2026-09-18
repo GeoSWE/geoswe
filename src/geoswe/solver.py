@@ -1588,6 +1588,52 @@ class Solver2D:
         else:
             sb.apply(self.q, self.t, h_min=self.cfg.h_min)
 
+    def set_step_forcings(self, spec):
+        """Hand the driver's post-step forcings to the dense fused step (opt-in).
+
+        ``spec`` is None (off) or a dict with the band sponge (``sponge``: keep, amb, x0, y0, w,
+        do_x, do_y; or None) and Green-Ampt/drain (``gd``: mode 1 GA, 2 drain, 3 both; cls, Ks,
+        psi, dth, F, Fmax or None, inv_tau; or None), plus ``ring_mask``, an interior uint8 mask of
+        the cells whose infiltration/drain the caller applies after its ring update. When the
+        fused step applies them it sets ``self._step_forcings_done`` for that step; otherwise the
+        caller runs its own kernels. Results are bit-identical to the separate kernels.
+        """
+        self._step_forcings = spec
+
+    def fold_cells_into_next_cfl(self, cells):
+        """Add the current lambda of ``cells`` (padded linear indices, int32) to the next step's
+        CFL reduction when the fused step with forcings reduced it (set_step_forcings cfl=True)."""
+        if not getattr(self, "_lam_pending", False) or cells is None or int(cells.size) == 0:
+            return
+        from . import rhs_cuda as R
+        n = int(cells.size)
+        R.build_cells_lam_kernel()(((n + 63) // 64,), (64,),
+                                   (self.q[0], self.q[1], self.q[2], cells, np.int32(n),
+                                    np.float32(self.cfg.g), self._frc_h_cfl, self._cfl_out_bits))
+
+    def _step_forcing_args(self):
+        import cupy as cp  # type: ignore
+        spec = getattr(self, "_step_forcings", None)
+        if spec is None:
+            return None
+        if not hasattr(self, "_frc_df"):
+            self._frc_df = cp.zeros(1, cp.float32); self._frc_du = cp.zeros(1, cp.uint8)
+        df, du = self._frc_df, self._frc_du
+        sp = spec.get("sponge"); gd = spec.get("gd"); rm = spec.get("ring_mask")
+        spa = ((np.int32(1), sp["keep"], sp["amb"], np.int32(sp["x0"]), np.int32(sp["y0"]), np.int32(sp["w"]),
+                np.int32(int(bool(sp["do_x"]))), np.int32(int(bool(sp["do_y"]))))
+               if sp is not None else (np.int32(0), df, df, np.int32(0), np.int32(0), np.int32(0), np.int32(0), np.int32(0)))
+        if gd is not None:
+            gda = (np.int32(gd["mode"]), gd.get("cls", du) if gd.get("cls") is not None else du,
+                   gd["Ks"] if gd.get("Ks") is not None else df, gd["psi"] if gd.get("psi") is not None else df,
+                   gd["dth"] if gd.get("dth") is not None else df, gd["F"] if gd.get("F") is not None else df,
+                   gd["Fmax"] if gd.get("Fmax") is not None else df, np.int32(int(gd.get("Fmax") is not None)),
+                   gd["inv_tau"] if gd.get("inv_tau") is not None else df)
+        else:
+            gda = (np.int32(0), du, df, df, df, df, df, np.int32(0), df)
+        rma = (rm, np.int32(1)) if rm is not None else (du, np.int32(0))
+        return spa + gda + rma
+
     def _storage_curve_k(self, dt):
         """sto_k of the storage curve (h* = sto_k * sigma**2), fixed at the first call; None when
         the curve is off or no storage is set."""
@@ -1683,8 +1729,26 @@ class Solver2D:
         sto_k = self._storage_curve_k(dt) if storage else None
         curve = sto_k is not None
         sto_extra = ((inv_sig, np.float32(sto_k)) if curve else (inv_sig,)) if storage else ()
-        kern = R.build_dense_fstep_kernel(no_sigma, int(_WETDRY_KEEP_H), cfl=fcfl, storage=storage, curve=curve)
-        carry = R.build_dense_carry_kernel(int(_WETDRY_KEEP_H), cfl=fcfl)
+        # step forcings (set_step_forcings): compact path only. With spec["cfl"] the same kernels also
+        # reduce the next step's lambda after the forcings, skipping the clamp cells, which the
+        # caller folds in after its clamp (fold_cells_into_next_cfl); cfl_dt then reads it.
+        frc = self._step_forcing_args() if self.inside_mask is not None else None
+        force = frc is not None
+        frc_cfl = False
+        if force:
+            _spec = self._step_forcings
+            frc_cfl = bool(_spec.get("cfl")) and self.cfl_robust_pct is None
+            fcfl = frc_cfl
+            if frc_cfl:
+                if not hasattr(self, "_frc_clamp_dummy"):
+                    self._frc_clamp_dummy = cp.zeros(1, cp.int32)
+                _ci = _spec.get("clamp_idx")
+                frc = frc + ((_ci, np.int32(int(_ci.size))) if _ci is not None
+                             else (self._frc_clamp_dummy, np.int32(0)))
+        frc_extra = frc if force else ()
+        kern = R.build_dense_fstep_kernel(no_sigma, int(_WETDRY_KEEP_H), cfl=fcfl, storage=storage, curve=curve,
+                                          force=force)
+        carry = R.build_dense_carry_kernel(int(_WETDRY_KEEP_H), cfl=fcfl, force=force)
         cfl_extra = ()
         if fcfl:
             if not hasattr(self, "_cfl_out_bits"):
@@ -1725,7 +1789,7 @@ class Solver2D:
                  (q[0], q[1], q[2], self.sigma, self.b, qn[0], qn[1], qn[2],
                   np.int32(nxp), np.int32(nyp), np.float32(1.0 / self.mesh.dx),
                   np.float32(1.0 / self.mesh.dy), np.float32(cfg.g), np.float32(cfg.h_min),
-                  idx, np.int32(n), qn[0], qn[1], qn[2]) + rain_args + common + sto_extra)
+                  idx, np.int32(n), qn[0], qn[1], qn[2]) + rain_args + common + sto_extra + frc_extra)
         if self.inside_mask is None:
             # 2-D launch over the padded grid (the full-rectangle path has no compact list); the
             # halo exchange was blocking in _apply_bc, so there is no interior/band split here.
@@ -1752,9 +1816,13 @@ class Solver2D:
               (q[0], q[1], q[2], qn[0], qn[1], qn[2], _inmask, np.int32(_have_mask), self._dfs_rzero,
                nf, ncls, ntab, np.int32(int(have_mtab)), self._max_h, np.int32(1),
                np.int32(nxp), np.int32(nyp), np.int32(ngh), np.float32(dt), np.float32(cfg.g),
-               np.float32(cfg.h_min), vcap, uq) + cfl_extra)
+               np.float32(cfg.h_min), vcap, uq) + cfl_extra + frc_extra)
+        self._step_forcings_done = force
         self.q, self._rhs_buf = qn, q
-        if fcfl:
+        if frc_cfl:
+            self._lam_pending = True          # read in cfl_dt, after the caller's clamp cells are folded in
+            self._frc_h_cfl = cfl_extra[1]
+        elif fcfl:
             self._lam_next = float(self._cfl_out_bits.view(cp.float32)[0])   # lambda of the NEW state
 
     def _fused_forcings_eligible(self):
@@ -2034,6 +2102,11 @@ class Solver2D:
             N = nx * ny
             block = _CFL_BSIZE   # same constant baked into #define BSIZE
             grid = min(2048, (N + block - 1) // block)
+            # lambda already reduced by the fused step with forcings: read it before the buffer is zeroed
+            _pend = None
+            if getattr(self, "_lam_pending", False):
+                self._lam_pending = False
+                _pend = float(self._cfl_out_bits.view(cp.float32)[0])
             # Cache the 1-elem out_bits buffer; zero it via fill (no realloc).
             if not hasattr(self, "_cfl_out_bits"):
                 self._cfl_out_bits = cp.zeros(1, dtype=cp.uint32)
@@ -2054,6 +2127,8 @@ class Solver2D:
             # without set_storage_fraction it's a cached all-ones array (no effect).
             inv_sigma = getattr(self, "_storage_inv_sigma", None)
             _ln = self._lam_next if getattr(self, "_dense_fcfl", False) else None
+            if _pend is not None:
+                _ln = _pend
             if _ln is not None:
                 self._lam_next = None      # consumed; reduced by the previous fused step
             elif inv_sigma is None:
@@ -2136,6 +2211,7 @@ class Solver2D:
         # interpolation in forcing modules.
         dt = float(dt)
 
+        self._step_forcings_done = False
         if cfg.time == "euler" and (not _dt_deferred) and self._dense_fstep_ok():
             # SWE_DENSE_FUSE_STEP=1: residual + update in ONE compact launch, state
             # double-buffered in the residual buffer, buffers swapped (see rhs_cuda

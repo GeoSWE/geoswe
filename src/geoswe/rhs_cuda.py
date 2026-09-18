@@ -1856,6 +1856,170 @@ void dense_carry_outside(
         "            }\n"
         "        }\n")
 
+    # ---- step forcings in the fused step (GEOSWE_DENSE_FUSE_STEP_FORCINGS=1, opt-in) ----
+    # The driver's post-step forcings, applied to each cell after its update, friction and
+    # running max: the band sponge (x band, then y band, as sponge_band_x/_y), then Green-Ampt
+    # infiltration and/or the drain reservoir with the exact expressions of ga_drain_step
+    # (gd_mode 3), ga_step (1) and drain_step (2). Ring cells skip the Green-Ampt/drain part;
+    # the driver applies it to them after the ring update (build_ring_forcings_kernel), so the
+    # order sponge -> ring -> infiltration/drain of the split kernels is kept for every cell.
+    _DFSTEP_FORCE_SIG_EXTRA = (
+        ",\n    const int sp_on, const float* __restrict__ sp_keep, const float* __restrict__ sp_amb,\n"
+        "    const int sp_x0, const int sp_y0, const int sp_w, const int sp_do_x, const int sp_do_y,\n"
+        "    const int gd_mode, const unsigned char* __restrict__ ga_cls, const float* __restrict__ ga_Ks,\n"
+        "    const float* __restrict__ ga_psi, const float* __restrict__ ga_dth, float* __restrict__ ga_F,\n"
+        "    const float* __restrict__ ga_Fmax, const int have_fmax, const float* __restrict__ inv_tau,\n"
+        "    const unsigned char* __restrict__ ring_mask, const int have_ring)")
+    _GD_BODY = r"""
+        if (gd_mode == 3) {                                   // ga_drain_step
+            float _h = h;
+            if (_h > 0.0f) {
+                float scale = 1.0f;
+                const int c = ga_cls[idx];
+                const float K = ga_Ks[c];
+                if (K > 0.0f) {
+                    const float KsDt = K * dt;
+                    const float head = ga_psi[c] + _h;
+                    const float F0 = ga_F[idx];
+                    const float a = F0 + KsDt;
+                    const float disc = a*a + 4.0f * KsDt * head * ga_dth[c];
+                    const float F1 = 0.5f * (a + sqrtf(fmaxf(disc, 0.0f)));
+                    const float dF_raw = F1 - F0;
+                    float dF = (dF_raw > 0.0f) ? dF_raw : 0.0f;
+                    if (dF > _h) dF = _h;
+                    if (have_fmax) { const float room = ga_Fmax[idx] - F0; if (dF > room) dF = (room > 0.0f) ? room : 0.0f; }
+                    const float h_new = _h - dF;
+                    scale *= (h_new / _h);
+                    _h = h_new;
+                    ga_F[idx] = F0 + dF;
+                }
+                const float it = inv_tau[idx];
+                if (it > 0.0f && _h > 0.0f) {
+                    const float decay = __expf(-dt * it);
+                    scale *= decay;
+                    _h *= decay;
+                }
+                h = _h;
+                hu *= scale;
+                hv *= scale;
+            }
+        } else if (gd_mode == 1) {                            // ga_step
+            const int c = ga_cls[idx];
+            const float K = ga_Ks[c];
+            const float _h = h;
+            if (K > 0.0f && _h > 0.0f) {
+                const float KsDt = K * dt;
+                const float head = ga_psi[c] + _h;
+                const float F0 = ga_F[idx];
+                const float a = F0 + KsDt;
+                const float disc = a*a + 4.0f * KsDt * head * ga_dth[c];
+                const float F1 = 0.5f * (a + sqrtf(fmaxf(disc, 0.0f)));
+                const float dF_raw = F1 - F0;
+                float dF = (dF_raw > 0.0f) ? dF_raw : 0.0f;
+                if (dF > _h) dF = _h;
+                if (have_fmax) { const float room = ga_Fmax[idx] - F0; if (dF > room) dF = (room > 0.0f) ? room : 0.0f; }
+                const float h_new = _h - dF;
+                const float alpha = h_new / _h;
+                h = h_new;
+                hu *= alpha;
+                hv *= alpha;
+                ga_F[idx] = F0 + dF;
+            }
+        } else if (gd_mode == 2) {                            // drain_step
+            const float it = inv_tau[idx];
+            const float _h = h;
+            if (it > 0.0f && _h > 0.0f) {
+                const float decay = __expf(-dt * it);
+                h = _h * decay;
+                hu *= decay;
+                hv *= decay;
+            }
+        }
+"""
+    _FORCE_BODY = (
+        "        if (sp_on) {\n"
+        "            if (sp_do_x && i >= sp_x0 && i < sp_x0 + sp_w) {\n"
+        "                const float k_ = sp_keep[idx]; const float a_ = sp_amb[idx];\n"
+        "                h = h * k_ + a_; hu = hu * k_; hv = hv * k_;\n"
+        "            }\n"
+        "            if (sp_do_y && j >= sp_y0 && j < sp_y0 + sp_w) {\n"
+        "                const float k_ = sp_keep[idx]; const float a_ = sp_amb[idx];\n"
+        "                h = h * k_ + a_; hu = hu * k_; hv = hv * k_;\n"
+        "            }\n"
+        "        }\n"
+        "        if (gd_mode && !(have_ring && i >= ngh && i < __NX__ - ngh && j >= ngh && j < __NY__ - ngh\n"
+        "                         && ring_mask[(i - ngh) * (__NY__ - 2*ngh) + (j - ngh)])) {\n"
+        + _GD_BODY +
+        "        }\n")
+    _DFSTEP_WRITE_OLD = ("        qn0[idx] = h; qn1[idx] = hu; qn2[idx] = hv;\n"
+                         "        if (have_max && h > max_h[idx]) max_h[idx] = h;\n")
+    _CARRY_WRITE_OLD = ("    qn0[idx] = h; qn1[idx] = hu; qn2[idx] = hv;\n"
+                        "    if (have_max && h > max_h[idx]) max_h[idx] = h;\n")
+
+    def _force_write(indent, nx_name, ny_name):
+        """Running max first (it tracks the stepped state), then the forcings, then the write."""
+        body = _FORCE_BODY.replace("__NX__", nx_name).replace("__NY__", ny_name)
+        if indent != "        ":
+            body = "\n".join((indent + ln[8:]) if ln.startswith("        ") else ln for ln in body.split("\n"))
+        return (f"{indent}if (have_max && h > max_h[idx]) max_h[idx] = h;\n" + body
+                + f"{indent}qn0[idx] = h; qn1[idx] = hu; qn2[idx] = hv;\n")
+
+    # Fused CFL with the step forcings: the lambda of the NEW state is reduced after the forcings.
+    # The clamp cells (changed later by the driver) are skipped here and folded in afterwards by
+    # build_cells_lam_kernel with the same expression; ring cells are CFL ghosts as before.
+    _IN_LIST_FN = ("__device__ __forceinline__ bool _in_list(const int idx, const int* __restrict__ lst, const int n) {\n"
+                   "    for (int k = 0; k < n; ++k) if (lst[k] == idx) return true;\n    return false;\n}\n")
+    _LAM_GHOST_OLD = "if (!(have_ghost && cfl_ghost[_ii] != 0) && !(h < h_cfl)) {"
+    _LAM_GHOST_FRC = "if (!(have_ghost && cfl_ghost[_ii] != 0) && !(h < h_cfl) && !_in_list(idx, clamp_idx, n_clamp)) {"
+    _FRC_CFL_SIG_EXTRA = ",\n    const int* __restrict__ clamp_idx, const int n_clamp)"
+
+    def build_cells_lam_kernel():
+        """lambda of listed cells (padded linear index), atomically maxed into cfl_bits."""
+        key = ("cellslam",)
+        if key not in _dfstep_kernels:
+            _dfstep_kernels[key] = cp.RawKernel(r"""
+extern "C" __global__
+void cells_lam(const float* __restrict__ q0, const float* __restrict__ q1, const float* __restrict__ q2,
+    const int* __restrict__ cells, const int n, const float g, const float h_cfl, unsigned int* __restrict__ cfl_bits)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    const int idx = cells[k];
+    const float h = q0[idx], hu = q1[idx], hv = q2[idx];
+    if (!(h < h_cfl)) {
+        const float u = hu / h;
+        const float v = hv / h;
+        const float au = fabsf(u), av = fabsf(v);
+        const float lam = (((au > av) ? au : av) + sqrtf(g * h));
+        if (lam > 0.0f) atomicMax(cfl_bits, __float_as_uint(lam));
+    }
+}
+""", "cells_lam")
+        return _dfstep_kernels[key]
+
+    def build_ring_forcings_kernel():
+        """Green-Ampt/drain on the ring cells after the ring update (see _FORCE_BODY)."""
+        key = ("ringforce",)
+        if key not in _dfstep_kernels:
+            src = (r"""
+extern "C" __global__
+void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __restrict__ q2,
+    const int* __restrict__ ring_i, const int* __restrict__ ring_j, const int n_ring, const int nyp,
+    const float dt, const int gd_mode, const unsigned char* __restrict__ ga_cls, const float* __restrict__ ga_Ks,
+    const float* __restrict__ ga_psi, const float* __restrict__ ga_dth, float* __restrict__ ga_F,
+    const float* __restrict__ ga_Fmax, const int have_fmax, const float* __restrict__ inv_tau)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n_ring) return;
+    const int idx = ring_i[k] * nyp + ring_j[k];
+    float h = q0[idx], hu = q1[idx], hv = q2[idx];
+""" + _GD_BODY + r"""
+    q0[idx] = h; q1[idx] = hu; q2[idx] = hv;
+}
+""")
+            _dfstep_kernels[key] = cp.RawKernel(src, "ring_forcings")
+        return _dfstep_kernels[key]
+
     def _dfstep_storage(sig_new, tail_new, curve=False):
         if tail_new.count(_DFSTEP_H_UPDATE_OLD) != 1:
             raise RuntimeError("dense fused-step storage: h-update anchor count != 1")
@@ -1863,12 +2027,13 @@ void dense_carry_outside(
                       else (_DFSTEP_STO_SIG_EXTRA, _DFSTEP_H_UPDATE_STO))
         return sig_new[:-1] + extra, tail_new.replace(_DFSTEP_H_UPDATE_OLD, upd)
 
-    def build_dense_fstep_kernel(no_sigma, wetdry_keep_h, cfl=False, storage=False, curve=False):
+    def build_dense_fstep_kernel(no_sigma, wetdry_keep_h, cfl=False, storage=False, curve=False, force=False):
         """Compact SRM-HLLC fp32 kernel with the update fused in (see above). storage=True adds
         the per-cell 1/sigma of sub-grid channel storage to the h update (last argument);
-        curve=True also applies the storage curve (arguments inv_sig, sto_k)."""
+        curve=True also applies the storage curve (arguments inv_sig, sto_k); force=True appends
+        the step forcings (_FORCE_BODY; arguments after the storage ones). force excludes cfl."""
         curve = bool(storage and curve)
-        key = ("fstep", bool(no_sigma), bool(cfl), bool(storage), curve)
+        key = ("fstep", bool(no_sigma), bool(cfl), bool(storage), curve, bool(force))
         if key in _dfstep_kernels:
             return _dfstep_kernels[key]
         src = _FUSED_RHS_WB_SRM_HLLC_COMPACT_SRC
@@ -1884,6 +2049,16 @@ void dense_carry_outside(
             assert tail_new != _DFSTEP_TAIL_NEW + _DFSTEP_CFL_REDUCE
         if storage:
             sig_new, tail_new = _dfstep_storage(sig_new, tail_new, curve)
+        if force:
+            if tail_new.count(_DFSTEP_WRITE_OLD) != 1:
+                raise RuntimeError("dense fused-step forcings: write anchor count != 1")
+            sig_new = sig_new[:-1] + _DFSTEP_FORCE_SIG_EXTRA
+            tail_new = tail_new.replace(_DFSTEP_WRITE_OLD, _force_write("        ", "nx", "ny"))
+            if cfl:
+                if tail_new.count(_LAM_GHOST_OLD) != 1:
+                    raise RuntimeError("dense fused-step forcings+cfl: lambda anchor count != 1")
+                sig_new = sig_new[:-1] + _FRC_CFL_SIG_EXTRA
+                tail_new = tail_new.replace(_LAM_GHOST_OLD, _LAM_GHOST_FRC)
         for old, new, tag in [(_DFSTEP_SIG_OLD, sig_new, "signature"),
                               (_DFSTEP_TAIL_OLD, tail_new, "tail")]:
             if src.count(old) != 1:
@@ -1896,8 +2071,10 @@ void dense_carry_outside(
             if "return;" in src.split("__global__", 1)[1].split("{", 1)[1]:
                 raise RuntimeError("dense fused-step-cfl: unexpected 'return;' left in kernel body")
         kname = ("fused_rhs_wb_srm_hllc_compact_fstep" + ("cfl" if cfl else "") + "_"
-                 + (("stc_" if curve else "sto_") if storage else "") + ("ns_" if no_sigma else "") + "fp32")
+                 + (("stc_" if curve else "sto_") if storage else "") + ("frc_" if force else "")
+                 + ("ns_" if no_sigma else "") + "fp32")
         s = (_hybrid_prefix() + f"#define WETDRY_KEEP_H {int(wetdry_keep_h)}\n"
+             + (_IN_LIST_FN if (force and cfl) else "")
              + _maybe_dry_skip(src).replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
                .replace("__T__", "float").replace("__KNAME__", kname))
         k = cp.RawKernel(s, kname, options=_dense_kopts())
@@ -1965,11 +2142,30 @@ void dense_carry_outside(
                  + _DFSTEP_CFL_LAM.replace("(ny - 2*ngh)", "(nyp - 2*ngh)") + _DFSTEP_CFL_REDUCE + "}\n"))
     assert "dense_carry_outside_cfl" in _DENSE_CARRY_CFL_SRC and _DENSE_CARRY_CFL_SRC.count("return;") == 0
 
-    def build_dense_carry_kernel(wetdry_keep_h, cfl=False):
-        key = ("carry", bool(cfl))
+    def build_dense_carry_kernel(wetdry_keep_h, cfl=False, force=False):
+        """Carry kernel for the cells outside the compact list; force=True appends the step
+        forcings as in build_dense_fstep_kernel (exclusive with cfl)."""
+        key = ("carry", bool(cfl), bool(force))
         if key not in _dfstep_kernels:
             src = (_DENSE_CARRY_CFL_SRC if cfl else _DENSE_CARRY_SRC).replace("__WETDRY_KEEP_H__", str(int(wetdry_keep_h)))
-            _dfstep_kernels[key] = cp.RawKernel(src, "dense_carry_outside_cfl" if cfl else "dense_carry_outside")
+            name = "dense_carry_outside_cfl" if cfl else "dense_carry_outside"
+            if force:
+                _sig_old = ("    const unsigned char* __restrict__ cfl_ghost, const int have_ghost)" if cfl else
+                            "    const float dt, const float g, const float h_min, const float vcap, const int use_quadratic)")
+                if src.count(_sig_old) != 1 or src.count(_CARRY_WRITE_OLD) != 1:
+                    raise RuntimeError("dense carry forcings: anchor count != 1")
+                _extra = _DFSTEP_FORCE_SIG_EXTRA if not cfl else _DFSTEP_FORCE_SIG_EXTRA[:-1] + _FRC_CFL_SIG_EXTRA
+                src = (src.replace(_sig_old, _sig_old[:-1] + _extra)
+                          .replace(_CARRY_WRITE_OLD, _force_write("    ", "nxp", "nyp"))
+                          .replace(f"void {name}(", f"void {name}_frc("))
+                if cfl:
+                    if src.count(_LAM_GHOST_OLD) != 1:
+                        raise RuntimeError("dense carry forcings+cfl: lambda anchor count != 1")
+                    src = src.replace(_LAM_GHOST_OLD, _LAM_GHOST_FRC)
+                    _dl = src.index("\n") + 1                     # after '#define WETDRY_KEEP_H'
+                    src = src[:_dl] + _IN_LIST_FN + src[_dl:]
+                name = name + "_frc"
+            _dfstep_kernels[key] = cp.RawKernel(src, name)
         return _dfstep_kernels[key]
 
     def _build_audusse_hllc(t_c, kname):

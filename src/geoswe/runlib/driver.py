@@ -1079,6 +1079,58 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
     else:
         apply_sponge = lambda: None
 
+    # ---- Step forcings fused into the dense fused step (opt-in) ----
+    # GEOSWE_DENSE_FUSE_STEP_FORCINGS=1 hands the band sponge and Green-Ampt/drain to the fused
+    # step (Solver2D.set_step_forcings); the ring cells get their infiltration/drain after the
+    # ring update below, so every cell keeps the order sponge -> ring -> GA/drain -> clamp and
+    # the results are bit-identical. Default off: the separate kernels run as before.
+    _ring_forcings = lambda dt: None
+    _clamp_idx_fold = None
+    _ga_fused_on = ga_active and args.dtype == "float32"
+    _gd_mode = 3 if (_ga_fused_on and drain_active) else 1 if _ga_fused_on else 2 if drain_active else 0
+    _sp_band = bool(sponge_applies) and sponge_impl == "band"
+    if (os.environ.get("GEOSWE_DENSE_FUSE_STEP_FORCINGS", "0") == "1" and args.dtype == "float32"
+            and not args.compressed and (_sp_band or not sponge_applies) and (_sp_band or _gd_mode)):
+        from .. import rhs_cuda as _R
+        _gd = None
+        if _gd_mode:
+            _gd = dict(mode=_gd_mode,
+                       cls=ga_cls_xp if _ga_fused_on else None, Ks=Ks_tab_xp if _ga_fused_on else None,
+                       psi=psi_tab_xp if _ga_fused_on else None, dth=dth_tab_xp if _ga_fused_on else None,
+                       F=F_xp if _ga_fused_on else None, Fmax=Fmax_pad_xp if _ga_fused_on else None,
+                       inv_tau=_inv_tau_xp if drain_active else None)
+        _sp = (dict(keep=keep_field, amb=amb_h, x0=int(_x_i_start), y0=int(_y_j_start), w=sponge_w,
+                    do_x=_do_x_sponge, do_y=_do_y_sponge) if _sp_band else None)
+        # The fused step can also reduce the next step's CFL lambda (after the forcings); it has no
+        # 1/sigma term, so only when the CFL step is sigma-free or there is no storage. The clamp
+        # cells change after the step and are folded in after apply_clamp().
+        _sf = int(os.environ.get("GEOSWE_SIGMA_FREE_CFL", os.environ.get("SIGMA_FREE_CFL", "0")))
+        _frc_cfl = (os.environ.get("GEOSWE_DENSE_FUSE_STEP_CFL", "1") == "1"
+                    and (getattr(s, "_storage_inv_sigma", None) is None or bool(_sf)))
+        _clamp_idx = None
+        _cr = locals().get("_clamp_rows")          # only set when this rank holds clamp cells
+        if clamp_active and _cr is not None:
+            _clamp_idx = (_cr * np.int32(s.q.shape[2]) + locals()["_clamp_cols"]).astype(cp.int32)
+        s.set_step_forcings(dict(sponge=_sp, gd=_gd, ring_mask=getattr(s, "_cfl_ghost_mask", None),
+                                 cfl=_frc_cfl, clamp_idx=_clamp_idx))
+        _clamp_idx_fold = _clamp_idx if _frc_cfl else None
+        if _gd_mode and n_ring_loc > 0:
+            _rfk = _R.build_ring_forcings_kernel()
+            _rf_df = cp.zeros(1, cp.float32); _rf_du = cp.zeros(1, cp.uint8)
+            def _ring_forcings(dt):
+                _rfk((_ring_grid,), (_ring_block,),
+                     (s.q[0].ravel(), s.q[1].ravel(), s.q[2].ravel(), _ring_i_xp, _ring_j_xp,
+                      np.int32(n_ring_loc), np.int32(s.q.shape[2]), np.float32(dt), np.int32(_gd_mode),
+                      _gd["cls"] if _gd["cls"] is not None else _rf_du,
+                      _gd["Ks"] if _gd["Ks"] is not None else _rf_df, _gd["psi"] if _gd["psi"] is not None else _rf_df,
+                      _gd["dth"] if _gd["dth"] is not None else _rf_df, _gd["F"] if _gd["F"] is not None else _rf_df,
+                      _gd["Fmax"] if _gd["Fmax"] is not None else _rf_df, np.int32(int(_gd["Fmax"] is not None)),
+                      _gd["inv_tau"] if _gd["inv_tau"] is not None else _rf_df))
+        say("  step forcings fused into the dense step: "
+            + ", ".join(x for x in (("band sponge" if _sp_band else ""),
+                                    {1: "Green-Ampt", 2: "drain", 3: "Green-Ampt + drain"}.get(_gd_mode, ""),
+                                    ("CFL reduction" if _frc_cfl else "")) if x))
+
     # ---- Init: ring BC at t=0 ----
     # Note: the solver's `step()` calls _update_max_depth() internally, so we
     # use `s._max_h` instead of tracking ourselves to match the runner exactly
@@ -1296,15 +1348,22 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
                 dt_val = float(s.cfl_dt())
             dt = min(dt_val, t_end - s.t, 1800.0)
         s.step(dt=dt)
-        apply_sponge()
-        apply_ring_bc()
-        # GA + drain (fused when both active; otherwise separate). Matches runner
-        # order so v94 bit-exact reproducibility is possible.
-        if ga_active and args.dtype == "float32":
-            apply_infiltration(dt)
+        if getattr(s, "_step_forcings_done", False):
+            # sponge and GA/drain ran inside the fused step; the ring cells take theirs after the ring
+            apply_ring_bc()
+            _ring_forcings(dt)
         else:
-            apply_drain(dt)
+            apply_sponge()
+            apply_ring_bc()
+            # GA + drain (fused when both active; otherwise separate). Matches runner
+            # order so v94 bit-exact reproducibility is possible.
+            if ga_active and args.dtype == "float32":
+                apply_infiltration(dt)
+            else:
+                apply_drain(dt)
         apply_clamp()
+        if _clamp_idx_fold is not None:
+            s.fold_cells_into_next_cfl(_clamp_idx_fold)
         steps += 1
         # Cross-section sampling
         if cs_active and s.t >= next_cs_t - 1e-9:
