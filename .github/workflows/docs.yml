@@ -1,0 +1,39 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . -r docs/requirements.txt
+      - run: python -m sphinx -b html -W --keep-going docs docs/_build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build
+
+  # Publishes docs/_build to https://geoswe.github.io/geoswe on every push to
+  # main. Requires Settings -> Pages -> Source = "GitHub Actions" once.
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

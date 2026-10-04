@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cpu:
+    name: CPU (NumPy backend) py${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[test]"
+      # The gpu-marked tests skip themselves when no CUDA device is usable
+      # (tests/conftest.py); "-m 'not gpu'" makes that explicit on CI.
+      - run: pytest -m "not gpu" -o addopts="" -q
+        env:
+          GEOSWE_BACKEND: numpy
+
+  examples:
+    name: CPU examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . matplotlib
+      - run: |
+          for ex in ex01_dam_break_1d ex02_circular_dam_break_2d ex03_lake_at_rest_2d ex04_rain_on_slope_2d ex07_convergence_order; do
+            python examples/$ex.py
+          done
+        env:
+          GEOSWE_BACKEND: numpy
+          MPLBACKEND: Agg

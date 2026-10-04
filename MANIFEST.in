@@ -1,0 +1,13 @@
+include LICENSE
+include README.md
+include CITATION.cff
+include environment.yml
+recursive-include src/geoswe *.py
+graft examples
+graft tests
+graft docs
+prune docs/_build
+# internal review notes and release planning stay in the repo, not the sdist
+prune docs/dev
+global-exclude __pycache__/*
+global-exclude *.py[cod]
