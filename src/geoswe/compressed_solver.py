@@ -2741,10 +2741,13 @@ class CompressedSolver:
         say(f"  [compressed] padded {nxp}x{nyp}; building ghost-ring mesh...")
         t0 = time.perf_counter()
         # the compressed path is square-cell only (kernels take one
-        # inv_dx for both axes; the cache stores no dy).
-        if abs(float(s.mesh.dx) - float(s.mesh.dy)) > 1e-12:
+        # inv_dx for both axes; the cache stores no dy). Only a real dense solver carries
+        # a mesh to check: a caller that spells `dx` out may pass any object with
+        # q/b/sigma/inside_mask (the scaling benchmark's --direct stand-in does).
+        _mesh = getattr(s, "mesh", None)
+        if _mesh is not None and abs(float(_mesh.dx) - float(_mesh.dy)) > 1e-12:
             raise ValueError(f"CompressedSolver requires square cells; dense mesh has "
-                             f"dx={s.mesh.dx} dy={s.mesh.dy}")
+                             f"dx={_mesh.dx} dy={_mesh.dy}")
         mesh_pad = Mesh2D(nx=nxp, ny=nyp, dx=dx, dy=dx, ngh=0)
         inside_host = cp.asnumpy(s.inside_mask).astype(bool)
         # GEOSWE_FROMDENSE_BUILD_STAGGER=N: build the host mesh in N rank-groups rather
