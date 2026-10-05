@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import cupy as cp
 from mpi4py import MPI
+from ..backend import elementwise_kernel, raw_kernel, raw_module
 from ..mesh import Mesh2D
 from ..solver import Solver2D, Config
 from ..forcing import RainfallForcing
@@ -526,7 +527,7 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
                 hv[idx] *= decay;
             }
             """
-            _drain_kernel = cp.RawKernel(_drain_src, "drain_step")
+            _drain_kernel = raw_kernel(_drain_src, "drain_step")
             _drain_N = int(_inv_tau_xp.size)
             _drain_block = 256
             _drain_grid = (_drain_N + _drain_block - 1) // _drain_block
@@ -582,7 +583,7 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
                 }
             }
             """
-            _clamp_kernel = cp.RawKernel(_clamp_src, "stage_clamp")
+            _clamp_kernel = raw_kernel(_clamp_src, "stage_clamp")
             _clamp_block = 64
             _clamp_grid = (_clamp_N + _clamp_block - 1) // _clamp_block
             _stride_clamp = int(s.q[0].shape[1])
@@ -760,7 +761,7 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
             F[idx] = F0 + dF;
         }
         """
-        _ga_kernel = cp.RawKernel(_ga_src, "ga_step")
+        _ga_kernel = raw_kernel(_ga_src, "ga_step")
         _ga_block = 256
         _ga_N = nxp_loc * nyp_loc
         _ga_grid = (_ga_N + _ga_block - 1) // _ga_block
@@ -823,7 +824,7 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
                 hv[idx] *= scale;
             }
             """
-            _ga_drain_kernel = cp.RawKernel(_ga_drain_src, "ga_drain_step")
+            _ga_drain_kernel = raw_kernel(_ga_drain_src, "ga_drain_step")
 
             _Fmax_dense = (Fmax_pad_xp if Fmax_pad_xp is not None
                            else cp.full(F_xp.shape, 3.0e38, cp.float32))
@@ -968,7 +969,7 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         q2[idx] = 0.0f;
     }
     """
-    _ring_bc_kernel = cp.RawKernel(_RING_BC_DIRICHLET_SRC, "ring_bc_dirichlet") \
+    _ring_bc_kernel = raw_kernel(_RING_BC_DIRICHLET_SRC, "ring_bc_dirichlet") \
                       if n_ring_loc > 0 else None
     if n_ring_loc > 0:
         _ring_i_xp = cp.asarray(ring_i_loc)
@@ -1086,7 +1087,7 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
                 q2[idx] = q2[idx] * k_;
             }
             """
-            _sponge_mod = cp.RawModule(code=_sponge_src)
+            _sponge_mod = raw_module(_sponge_src)
             _sponge_band_x = _sponge_mod.get_function("sponge_band_x")
             _sponge_band_y = _sponge_mod.get_function("sponge_band_y")
 
@@ -1130,7 +1131,7 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
             say(f"  Sponge: {sponge_w} cells at global +x/+y edges (this rank applies "
                 f"+x={_do_x_sponge} +y={_do_y_sponge}); band-only RawKernel (OPT)")
         else:
-            _SPONGE_KERNEL = cp.ElementwiseKernel(
+            _SPONGE_KERNEL = elementwise_kernel(
                 "T keep, T amb_h_premul",
                 "T q0, T q1, T q2",
                 """q0 = q0 * keep + amb_h_premul;

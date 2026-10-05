@@ -1,8 +1,8 @@
 """GeoSWE: Geophysical Shallow-Water Engine.
 
 A finite-volume solver for the 2D nonlinear shallow-water equations, built for
-flood modeling from county to continental scale. It runs on NVIDIA GPUs through
-CuPy, across GPUs with mpi4py, and on the CPU with NumPy.
+flood modeling from county to continental scale. It runs on NVIDIA and AMD GPUs
+through CuPy, across GPUs with mpi4py, and on the CPU with NumPy.
 
 Highlights
 ----------
@@ -39,6 +39,7 @@ from .backend import (
     xp,
     set_backend,
     get_backend,
+    gpu_platform,
     to_host,
     to_device,
     sync,
@@ -56,6 +57,7 @@ __all__ = [
     "xp",
     "set_backend",
     "get_backend",
+    "gpu_platform",
     "to_host",
     "to_device",
     "sync",
@@ -93,7 +95,8 @@ def __getattr__(name):
         except ImportError as e:  # clear message on CPU-only installs
             raise ImportError(
                 "geoswe.CompressedSolver needs CuPy and SciPy (the gpu extra): "
-                "pip install 'cupy-cuda12x[ctk]' scipy"
+                "pip install 'cupy-cuda12x[ctk]' scipy, or on an AMD GPU (the gpu-rocm "
+                "extra): pip install 'cupy-rocm-7-0' scipy"
             ) from e
         return CompressedSolver
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

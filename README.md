@@ -26,8 +26,8 @@ observation-driven coastal stage boundary. Its distinguishing feature is a
 band) are packed into flat arrays before the run, so memory and work scale
 with the flooded landscape rather than its bounding rectangle. The same
 finite-volume kernel runs on the dense grid and on the compressed mesh, bit for
-bit. It runs on NVIDIA GPUs through [CuPy](https://cupy.dev), scales across GPUs
-with `mpi4py`, and falls back to NumPy on the CPU for prototyping and CI.
+bit. It runs on NVIDIA and AMD GPUs through [CuPy](https://cupy.dev), scales across
+GPUs with `mpi4py`, and falls back to NumPy on the CPU for prototyping and CI.
 
 ## Highlights
 
@@ -60,7 +60,7 @@ Comparison codes as benchmarked: TRITON (commit `ec35bc4`), SERGHEI (commit `39a
 - **Numerics:** HLLC and local Lax-Friedrichs fluxes; the Xia et al. (2017) surface-reconstruction method and Audusse hydrostatic reconstruction for exact lake-at-rest balance over arbitrary bathymetry; first-order, MUSCL, and fifth-order reconstruction; forward Euler and SSP-RK3.
 - **Physics:** point-implicit Manning friction, wetting and drying, gridded rainfall, Green-Ampt infiltration, depth sinks, and an inverse-distance-weighted coastal stage ring driven by NOAA CO-OPS gauge records.
 - **Compressed active-cell mesh:** static active set chosen from terrain criteria before the run, `int16` neighbor offsets, a two-cell ghost halo, build-once caching, active-cell-balanced multi-GPU partitions, and checkpoint/restart.
-- **Backends:** CuPy on NVIDIA GPUs (fused single-kernel time step), `mpi4py` for multi-GPU runs with CUDA-aware halo exchange, and a NumPy CPU fallback that runs the same scheme in float64.
+- **Backends:** CuPy on NVIDIA GPUs (CUDA) and AMD GPUs (ROCm), with a fused single-kernel time step; `mpi4py` for multi-GPU runs with GPU-aware halo exchange; and a NumPy CPU fallback that runs the same scheme in float64.
 
 ## Installation
 
@@ -72,6 +72,9 @@ pip install geoswe
 # (installs one CuPy build with its CUDA headers; do not add a second CuPy build)
 pip install "geoswe[gpu,mpi,io,forcings]"
 
+# The same on an AMD GPU with ROCm 7
+pip install "geoswe[gpu-rocm,mpi,io,forcings]"
+
 # From a source checkout (needed for the examples and the bundled terrain)
 git clone https://github.com/GeoSWE/geoswe.git && cd geoswe
 pip install -e ".[all]"
@@ -80,7 +83,7 @@ pip install -e ".[all]"
 The development version installs straight from the repository:
 `pip install "geoswe @ git+https://github.com/GeoSWE/geoswe.git"`.
 
-See the [installation page](https://geoswe.github.io/geoswe/installation.html) for CUDA and CuPy version notes and the conda environment.
+See the [installation page](https://geoswe.github.io/geoswe/installation.html) for CUDA and CuPy version notes and the conda environment, and the [AMD GPUs page](https://geoswe.github.io/geoswe/amd_gpus.html) for ROCm.
 
 ## Quick start
 

@@ -4,8 +4,8 @@
 finite-volume solver for the 2D nonlinear shallow-water equations, built for
 flood modeling from **county to continental scale**.
 
-GeoSWE runs on NVIDIA GPUs through [CuPy](https://cupy.dev), scales across many
-GPUs with `mpi4py`, and has a transparent **NumPy CPU fallback** so the whole
+GeoSWE runs on NVIDIA and AMD GPUs through [CuPy](https://cupy.dev), scales across
+many GPUs with `mpi4py`, and has a transparent **NumPy CPU fallback** so the whole
 API works without a GPU for prototyping, teaching, and CI.
 
 ```{admonition} At a glance
@@ -70,6 +70,7 @@ userguide/well_balanced
 
 compressed_mesh
 multigpu_mpi
+amd_gpus
 configuration
 benchmarks
 ```

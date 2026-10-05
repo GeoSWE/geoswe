@@ -83,9 +83,9 @@ mpirun -n 4 python examples/ex05_scaling_bench.py --mode strong --ny-total 30000
 mpirun -n 1 python examples/ex05_scaling_bench.py --mode weak      # one GPU
 ```
 
-Needs the `gpu` and `mpi` extras. The default weak-scaling size takes about
-12 GB of GPU memory per rank and the default strong-scaling size about 19 GB on
-one GPU; reduce `--ny-per-rank` or `--ny-total` on a smaller device.
+Needs the `gpu` and `mpi` extras (`gpu-rocm` on an AMD GPU). The default weak-scaling
+size takes about 12 GB of GPU memory per rank and the default strong-scaling size
+about 19 GB on one GPU; reduce `--ny-per-rank` or `--ny-total` on a smaller device.
 
 ## Convergence
 

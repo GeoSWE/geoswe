@@ -32,6 +32,7 @@ import os
 import numpy as np
 
 import cupy as cp
+from .backend import gpu_platform, raw_kernel
 from .compressed_mesh import CompressedMesh2D
 from . import rhs_cuda as R
 
@@ -153,7 +154,7 @@ def build_flat_srm_hllc_kernel(dtype=cp.float32, no_sigma=False, options=()):
          .replace("__BED_GRADIENT_BLOCK__", R._bed_gradient_block())
          .replace("__T__", t_c)
          .replace("__KNAME__", kname))
-    return cp.RawKernel(s, kname, options=tuple(options))
+    return raw_kernel(s, kname, options=tuple(options))
 
 
 # GATHERED variant: thread tid -> k = bidx[tid]. Launches only n_bnd threads (the
@@ -186,7 +187,7 @@ def build_flat_srm_hllc_gathered_kernel(dtype=cp.float32, no_sigma=False):
          .replace("__BED_GRADIENT_BLOCK__", R._bed_gradient_block())
          .replace("__T__", t_c)
          .replace("__KNAME__", kname))
-    return cp.RawKernel(s, kname)
+    return raw_kernel(s, kname)
 
 
 def nbr_to_int16_delta(nbr_abs):
@@ -383,7 +384,7 @@ def bedgrad_precomp_enabled():
 
 
 def build_flat_bedgrad_kernel():
-    return cp.RawKernel(_BEDGRAD_PRECOMP_SRC, "flat_bedgrad")
+    return raw_kernel(_BEDGRAD_PRECOMP_SRC, "flat_bedgrad")
 
 
 def build_flat_srm_hllc_kernel_pg(dtype=cp.float32, no_sigma=False):
@@ -408,7 +409,7 @@ def build_flat_srm_hllc_kernel_pg(dtype=cp.float32, no_sigma=False):
          .replace("__BED_GRADIENT_BLOCK__", _GRAD_BLOCK_PG)
          .replace("__T__", t_c)
          .replace("__KNAME__", kname))
-    return cp.RawKernel(s, kname)
+    return raw_kernel(s, kname)
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +467,7 @@ def regular_fastpath_enabled():
 
 
 def build_flat_mark_regular_kernel():
-    return cp.RawKernel(_MARK_REGULAR_SRC, "flat_mark_regular")
+    return raw_kernel(_MARK_REGULAR_SRC, "flat_mark_regular")
 
 
 def build_flat_srm_hllc_kernel_pg_reg(stride, dtype=cp.float32, no_sigma=False):
@@ -489,7 +490,7 @@ def build_flat_srm_hllc_kernel_pg_reg(stride, dtype=cp.float32, no_sigma=False):
          .replace("__BED_GRADIENT_BLOCK__", _GRAD_BLOCK_PG)
          .replace("__T__", t_c)
          .replace("__KNAME__", kname))
-    return cp.RawKernel(s, kname)
+    return raw_kernel(s, kname)
 
 
 # ---------------------------------------------------------------------------
@@ -576,11 +577,11 @@ def reg2_enabled():
 
 
 def build_flat_mark_canon_kernel():
-    return cp.RawKernel(_MARK_REGXY_SRC, "flat_mark_canon")
+    return raw_kernel(_MARK_REGXY_SRC, "flat_mark_canon")
 
 
 def build_flat_mark_reg2xy_kernel():
-    return cp.RawKernel(_MARK_REGXY_SRC, "flat_mark_reg2xy")
+    return raw_kernel(_MARK_REGXY_SRC, "flat_mark_reg2xy")
 
 
 def build_flat_srm_hllc_kernel_reg2(stride, dtype=cp.float32, no_sigma=False, options=(),
@@ -603,7 +604,7 @@ def build_flat_srm_hllc_kernel_reg2(stride, dtype=cp.float32, no_sigma=False, op
          .replace("__BED_GRADIENT_BLOCK__", R._bed_gradient_block())
          .replace("__T__", t_c)
          .replace("__KNAME__", kname))
-    return cp.RawKernel(s, kname, options=tuple(options))
+    return raw_kernel(s, kname, options=tuple(options))
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +743,7 @@ def fuse_step_enabled():
 
 def build_flat_forcings_gather_kernel(wetdry_keep_h):
     src = _FORCINGS_GATHER_SRC.replace("__WETDRY_KEEP_H__", str(int(wetdry_keep_h)))
-    return cp.RawKernel(src, "fused_forcings_gather")
+    return raw_kernel(src, "fused_forcings_gather")
 
 
 _PRE_A_FLAT_FUSED_GATHER = (
@@ -798,7 +799,7 @@ def build_flat_fused_step_kernel(pre_b, wetdry_keep_h, stride=None, dtype=cp.flo
          + f"#define WETDRY_KEEP_H {int(wetdry_keep_h)}\n"
          + src.replace("__BED_GRADIENT_BLOCK__", R._bed_gradient_block())
               .replace("__T__", t_c).replace("__KNAME__", kname))
-    return cp.RawKernel(s, kname, options=tuple(options))
+    return raw_kernel(s, kname, options=tuple(options))
 
 
 # ---------------------------------------------------------------------------
@@ -851,7 +852,7 @@ def build_flat_srm_hllc_kernel_gather_chained(dtype=cp.float32, no_sigma=False, 
     s = (R._hybrid_prefix() + src
          .replace("__BED_GRADIENT_BLOCK__", R._bed_gradient_block())
          .replace("__T__", t_c).replace("__KNAME__", kname))
-    return cp.RawKernel(s, kname, options=tuple(options))
+    return raw_kernel(s, kname, options=tuple(options))
 
 
 # ---------------------------------------------------------------------------
@@ -860,7 +861,7 @@ def build_flat_srm_hllc_kernel_gather_chained(dtype=cp.float32, no_sigma=False, 
 # in CuPy's pool and show up as +1-2 GB of "peak" memory on a 125 M-cell case. These two
 # kernels count and compact with one atomic per block / per warp and no temporaries.
 # ---------------------------------------------------------------------------
-_COUNT_COMPACT_SRC = r"""
+_COUNT_BITS_SRC = r"""
 // count cells with (is_active & mask) == want (and is_active != 0)
 extern "C" __global__
 void flat_count_bits(const unsigned char* __restrict__ ia, const int N,
@@ -872,7 +873,8 @@ void flat_count_bits(const unsigned char* __restrict__ ia, const int N,
     const int c = __syncthreads_count(hit);
     if (threadIdx.x == 0 && c) atomicAdd(out, (unsigned int)c);
 }
-// append k for every active cell with (is_active & mask) != want  (warp-aggregated atomics)
+"""
+_COMPACT_NOT_SRC = r"""// append k for every active cell with (is_active & mask) != want  (warp-aggregated atomics)
 extern "C" __global__
 void flat_compact_not(const unsigned char* __restrict__ ia, const int N,
                       const int mask, const int want, int* __restrict__ idx,
@@ -890,14 +892,36 @@ void flat_compact_not(const unsigned char* __restrict__ ia, const int N,
     if (hit) idx[base + __popc(m & ((1u << lane) - 1u))] = k;
 }
 """
+# AMD wavefronts are 64 lanes wide and HIP's *_sync builtins take 64-bit masks, so the
+# 32-lane aggregation above does not compile under ROCm. The compaction runs once per
+# mesh build, so there each hit thread takes its own slot (one atomic per listed cell).
+# The list comes out in a different order; its consumers are gathered launches that
+# treat each cell independently.
+_COMPACT_NOT_HIP_SRC = r"""// append k for every active cell with (is_active & mask) != want  (one atomic per hit)
+extern "C" __global__
+void flat_compact_not(const unsigned char* __restrict__ ia, const int N,
+                      const int mask, const int want, int* __restrict__ idx,
+                      unsigned int* __restrict__ counter)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= N) return;
+    const unsigned char a = ia[k];
+    if ((a != 0) && ((a & mask) != want)) idx[atomicAdd(counter, 1u)] = k;
+}
+"""
+_COUNT_COMPACT_SRC = _COUNT_BITS_SRC + _COMPACT_NOT_SRC   # the NVIDIA build, both kernels
+
+
+def _count_compact_src():
+    return _COUNT_BITS_SRC + _COMPACT_NOT_HIP_SRC if gpu_platform() == "hip" else _COUNT_COMPACT_SRC
 
 
 def build_flat_count_bits_kernel():
-    return cp.RawKernel(_COUNT_COMPACT_SRC, "flat_count_bits")
+    return raw_kernel(_count_compact_src(), "flat_count_bits")
 
 
 def build_flat_compact_not_kernel():
-    return cp.RawKernel(_COUNT_COMPACT_SRC, "flat_compact_not")
+    return raw_kernel(_count_compact_src(), "flat_compact_not")
 
 
 # ---------------------------------------------------------------------------
@@ -1026,7 +1050,7 @@ def build_flat_fused_step_cfl_kernel(pre_b, wetdry_keep_h, stride=None, dtype=cp
          + f"#define WETDRY_KEEP_H {int(wetdry_keep_h)}\n"
          + src.replace("__BED_GRADIENT_BLOCK__", R._bed_gradient_block())
               .replace("__T__", t_c).replace("__KNAME__", kname))
-    return cp.RawKernel(s, kname, options=tuple(options))
+    return raw_kernel(s, kname, options=tuple(options))
 
 
 # band update (halo-overlap split) with the lambda reduction: same as fused_forcings_gather
@@ -1051,7 +1075,7 @@ def build_flat_forcings_gather_cfl_kernel(wetdry_keep_h, linf=False):
             "void fused_forcings_gather_cfl(", "void fused_forcings_gather_cfl_linf(")
     if src.count("return;") != 0:
         raise RuntimeError("fused_forcings_gather_cfl: early return left in body")
-    return cp.RawKernel(src, "fused_forcings_gather_cfl_linf" if linf else "fused_forcings_gather_cfl")
+    return raw_kernel(src, "fused_forcings_gather_cfl_linf" if linf else "fused_forcings_gather_cfl")
 
 
 def fuse_cfl_enabled():

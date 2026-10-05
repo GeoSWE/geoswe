@@ -44,6 +44,9 @@ dependencies = ["numpy>=1.24"]
 # and CUDA 13 drivers without a system toolkit. Install one CuPy build, never both.
 gpu = ["cupy-cuda12x[ctk]>=14.0", "scipy>=1.10"]
 gpu-cuda13 = ["cupy-cuda13x[ctk]>=14.0", "scipy>=1.10"]   # the CUDA 13 build, if preferred
+# AMD GPUs: CuPy's ROCm 7 build. It compiles kernels with the machine's own ROCm install
+# (hipcc on PATH, ROCM_HOME set), so there is no [ctk] counterpart. See docs/amd_gpus.md.
+gpu-rocm = ["cupy-rocm-7-0>=14.0", "scipy>=1.10"]
 mpi = ["mpi4py>=3.1"]                        # multi-GPU / distributed halo exchange
 io = ["rasterio>=1.3", "pyproj>=3.5"]        # GeoTIFF read/write + CRS transforms
 forcings = ["pandas>=2.0", "scipy>=1.10"]    # CSV rainfall/tide ingestion + case conditioning
@@ -71,7 +74,7 @@ include = ["geoswe*"]
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
-    "gpu: needs a usable CUDA device; skipped automatically when none is visible (conftest.py)",
+    "gpu: needs a usable GPU (NVIDIA or AMD); skipped automatically when none is visible (conftest.py)",
 ]
 
 [tool.ruff]

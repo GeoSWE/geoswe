@@ -32,7 +32,7 @@ from .bc import (apply_bc_1d, apply_bc_2d, apply_bc_2d_face,
 from .well_balanced import (hr_face_states_1d, hr_source_1d, hr_face_states_2d,
                             hr_source_2d, srm_face_states_1d, srm_source_1d,
                             srm_face_states_2d, srm_source_2d)
-from .backend import USING_CUPY, to_host
+from .backend import USING_CUPY, elementwise_kernel, raw_kernel, to_host
 
 if USING_CUPY:
     try:
@@ -213,12 +213,10 @@ def _ensure_cfl_lammax_kernel():
                 f"CFL kernel source #define BSIZE does not match "
                 f"_CFL_BSIZE={_CFL_BSIZE}; update both together")
     if _CFL_LAMMAX_KERNEL_FP32_LEAN is None:
-        import cupy as cp  # type: ignore
-        _CFL_LAMMAX_KERNEL_FP32_LEAN = cp.RawKernel(
+        _CFL_LAMMAX_KERNEL_FP32_LEAN = raw_kernel(
             _CFL_LAMMAX_SRC_LEAN, "lammax_fp32_lean")
     if _CFL_LAMMAX_KERNEL_FP32 is None:
-        import cupy as cp  # type: ignore
-        _CFL_LAMMAX_KERNEL_FP32 = cp.RawKernel(_CFL_LAMMAX_SRC, "lammax_fp32")
+        _CFL_LAMMAX_KERNEL_FP32 = raw_kernel(_CFL_LAMMAX_SRC, "lammax_fp32")
 
 
 # ============================================================
@@ -445,8 +443,7 @@ def _ensure_fused_forcings_dense():
     """Compile the dense fused forcings kernel on first use."""
     global _FUSED_FORCINGS_DENSE
     if _FUSED_FORCINGS_DENSE is None:
-        import cupy as cp  # type: ignore
-        _FUSED_FORCINGS_DENSE = cp.RawKernel(
+        _FUSED_FORCINGS_DENSE = raw_kernel(
             _FUSED_FORCINGS_DENSE_SRC, "fused_forcings_dense")
     return _FUSED_FORCINGS_DENSE
 
@@ -522,12 +519,10 @@ _FRICTION_KERNEL_SRC_LEAN = _FRICTION_KERNEL_SRC_LEAN.replace("__WETDRY_KEEP_H__
 def _ensure_friction_kernel():
     global _FRICTION_KERNEL_FP32, _FRICTION_KERNEL_FP32_LEAN
     if _FRICTION_KERNEL_FP32_LEAN is None:
-        import cupy as cp  # type: ignore
-        _FRICTION_KERNEL_FP32_LEAN = cp.RawKernel(
+        _FRICTION_KERNEL_FP32_LEAN = raw_kernel(
             _FRICTION_KERNEL_SRC_LEAN, "friction_wd_lean")
     if _FRICTION_KERNEL_FP32 is None:
-        import cupy as cp  # type: ignore
-        _FRICTION_KERNEL_FP32 = cp.RawKernel(_FRICTION_KERNEL_SRC, "friction_wd")
+        _FRICTION_KERNEL_FP32 = raw_kernel(_FRICTION_KERNEL_SRC, "friction_wd")
 
 
 @dataclass
@@ -1447,16 +1442,15 @@ class Solver2D:
         self._storage_inv_sigma = inv_sigma_full
         # ElementwiseKernel for fused axpy with per-cell scaling
         if _USING_CUPY:
-            import cupy as cp  # type: ignore
             if not hasattr(self, "_axpy_sigma_kernel"):
-                self._axpy_sigma_kernel = cp.ElementwiseKernel(
+                self._axpy_sigma_kernel = elementwise_kernel(
                     'T q_in, T dt, T r, T inv_s', 'T q_out',
                     'q_out = q_in + dt * r * inv_s',
                     'axpy_sigma')
             if not hasattr(self, "_axpy_sigma_curve_kernel"):
                 # Config.storage_courant > 0: same update with the storage curve (see
                 # build_dense_fstep_kernel(curve=True), which it mirrors).
-                self._axpy_sigma_curve_kernel = cp.ElementwiseKernel(
+                self._axpy_sigma_curve_kernel = elementwise_kernel(
                     'T q_in, T dt, T r, T inv_s, T k', 'T q_out',
                     """
                     T h = q_in + dt * r * inv_s;
@@ -2161,8 +2155,7 @@ class Solver2D:
                 # are untouched) and only at inside cells; with no mask it does the plain f32 add.
                 if _USING_CUPY and getattr(rhs, "dtype", None) is not None and rhs.dtype == np.float32:
                     if not hasattr(self, "_rain_add_kernel"):
-                        import cupy as cp  # type: ignore
-                        self._rain_add_kernel = cp.ElementwiseKernel(
+                        self._rain_add_kernel = elementwise_kernel(
                             "T rhs_in, float32 rate, uint8 mask, int32 have_mask", "T rhs_out",
                             "if (have_mask) { rhs_out = mask ? (T)((double)rhs_in + (double)rate) : rhs_in; }"
                             " else { rhs_out = rhs_in + (T)rate; }",
@@ -2433,8 +2426,7 @@ class Solver2D:
             # path doesn't AttributeError here.
             if _USING_CUPY and isinstance(rhs, np.ndarray) and rhs is getattr(self, "_rhs_buf", None):
                 if not hasattr(self, "_axpy_kernel"):
-                    import cupy as cp  # type: ignore
-                    self._axpy_kernel = cp.ElementwiseKernel(
+                    self._axpy_kernel = elementwise_kernel(
                         'T q_in, T dt, T r', 'T q_out',
                         'q_out = q_in + dt * r',
                         'axpy_inplace')

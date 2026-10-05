@@ -7,8 +7,9 @@ Mirrors the MFC pattern (arXiv:2505.07392):
     ``__cuda_array_interface__``, no host staging
 
 Each rank pins to one GPU based on its local rank (set via
-``CUDA_VISIBLE_DEVICES`` before importing CuPy, or via ``cp.cuda.Device``
-inside ``Halo2D.__init__``).
+``CUDA_VISIBLE_DEVICES`` -- ``ROCR_VISIBLE_DEVICES`` on AMD -- before importing
+CuPy, by the scheduler's GPU binding, or via ``cp.cuda.Device`` inside
+``Halo2D.__init__``).
 
 The CUDA-aware MPI path is enabled by ``SWE_HALO_CUDA_AWARE=1``. When the
 MPI build does not support CUDA (Open MPI without ``--with-cuda``), the
@@ -16,7 +17,10 @@ default host-staging path is used: pack → ``cp.asnumpy`` → MPI →
 ``cp.asarray`` → unpack. Functionally identical, ~3-10× slower depending
 on PCIe bandwidth. For multi-GPU production runs, build mpi4py against an
 MPI with native CUDA support (Open MPI ``--with-cuda``, MPICH ``--with-cuda``,
-or HPE Cray MPICH with ``MPICH_GPU_SUPPORT_ENABLED=1``).
+or HPE Cray MPICH with ``MPICH_GPU_SUPPORT_ENABLED=1``). On AMD GPUs the same
+switch selects GPU-aware MPI: CuPy's ROCm build exposes device arrays through
+the same ``__cuda_array_interface__``, and Cray MPICH moves them through its
+GPU transport layer.
 
 Single-rank usage (``mpirun -n 1``) is supported but a no-op in practice
 (the cart self-neighbours produce self-Sendrecv calls); callers should skip
@@ -46,6 +50,22 @@ def _pinned_empty(shape, dtype):
         return np.empty(shape, dtype)
 
 
+def _cray_mpich_gpu_support_off():
+    """True when the MPI library is HPE Cray MPICH running without its GPU support.
+
+    Cray MPICH accepts device pointers (NVIDIA and AMD alike) only when the job sets
+    ``MPICH_GPU_SUPPORT_ENABLED=1``; the library reads it at ``MPI_Init`` and treats
+    every buffer as host memory otherwise.
+    """
+    import os
+    try:
+        if "CRAY MPICH" not in MPI.Get_library_version().upper():
+            return False
+    except Exception:
+        return False
+    return os.environ.get("MPICH_GPU_SUPPORT_ENABLED", "0") != "1"
+
+
 def probe_cuda_aware(comm):
     """Resolve SWE_HALO_CUDA_AWARE against the actual MPI build.
 
@@ -54,6 +74,9 @@ def probe_cuda_aware(comm):
     warns once on rank 0 and returns False so device pointers are never handed
     to a host-only MPI (segfault / garbage transmit). Shared by Halo2D and
     CompressedHalo so the two halo paths cannot disagree.
+
+    "CUDA-aware" is the historical name: the same switch selects GPU-aware MPI
+    on AMD GPUs (device pointers through HPE Cray MPICH's GPU transport layer).
     """
     import os
     requested = os.environ.get("SWE_HALO_CUDA_AWARE", "0") == "1"
@@ -70,6 +93,15 @@ def probe_cuda_aware(comm):
                 requested = False
         except AttributeError:
             pass   # older mpi4py / non-OpenMPI: probe unavailable, trust the env
+    if requested and MPI is not None and _cray_mpich_gpu_support_off():
+        if comm is None or comm.rank == 0:
+            import warnings
+            warnings.warn(
+                "SWE_HALO_CUDA_AWARE=1 set but Cray MPICH is running without GPU "
+                "support (MPICH_GPU_SUPPORT_ENABLED is not 1). Disabling the "
+                "GPU-aware path (host staging) to avoid segfault/garbage transmit.",
+                RuntimeWarning, stacklevel=2)
+        requested = False
     return requested
 
 

@@ -9,8 +9,11 @@ and GeoTIFF I/O are opt-in extras.
 # CPU only (NumPy backend): enough for the examples, tests, and docs
 pip install geoswe
 
-# GPU (CUDA 12 or CUDA 13 drivers)
+# NVIDIA GPU (CUDA 12 or CUDA 13 drivers)
 pip install "geoswe[gpu]"
+
+# AMD GPU (ROCm 7.x)
+pip install "geoswe[gpu-rocm]"
 
 # everything: GPU + MPI + GeoTIFF I/O + CSV forcings
 pip install "geoswe[gpu,mpi,io,forcings]"
@@ -37,6 +40,7 @@ pip install -e ".[all]"
 |---|---|---|
 | `gpu` | `cupy-cuda12x[ctk]`, `scipy` | GPU acceleration (dense **and** compressed solvers) on CUDA 12 and CUDA 13 drivers |
 | `gpu-cuda13` | `cupy-cuda13x[ctk]`, `scipy` | the same with the CUDA 13 build of CuPy, if you prefer it |
+| `gpu-rocm` | `cupy-rocm-7-0`, `scipy` | GPU acceleration on AMD GPUs with ROCm 7; see [AMD GPUs](amd_gpus.md) |
 | `mpi` | `mpi4py` | multi-GPU / distributed runs (halo exchange) |
 | `io` | `rasterio`, `pyproj` | reading DEMs and writing flood GeoTIFFs |
 | `forcings` | `pandas`, `scipy` | CSV rainfall/tide ingestion, case conditioning, the high-level runner |
@@ -50,8 +54,16 @@ with or without a system CUDA toolkit; a CUDA 13 machine does not need the CUDA 
 build. To switch builds anyway, remove the old one first
 (`pip uninstall -y cupy-cuda12x cupy-cuda13x`), then install the extra you want.
 GeoSWE refuses the GPU backend when two CuPy builds are installed, because they
-overwrite each other. On **CUDA 11**, install GeoSWE without the `gpu` extra and
-add `cupy-cuda11x` yourself.
+overwrite each other; that includes a ROCm build next to a CUDA one. On **CUDA 11**,
+install GeoSWE without the `gpu` extra and add `cupy-cuda11x` yourself.
+```
+
+```{note}
+The `all` extra installs the NVIDIA build. On an AMD GPU, name the extras:
+`pip install "geoswe[gpu-rocm,mpi,io,forcings]"`. CuPy's ROCm build compiles
+kernels with the machine's own ROCm installation, so ROCm must be installed and on
+the path at run time. [AMD GPUs](amd_gpus.md) has the details and the settings for
+OLCF Frontier.
 ```
 
 ## conda
@@ -71,8 +83,8 @@ environment variable:
 
 | `GEOSWE_BACKEND` | Behaviour |
 |---|---|
-| unset | the GPU (CuPy) when CuPy and a CUDA device are present, otherwise NumPy on the CPU |
-| `cupy` | the GPU; an error if no CUDA device is visible, and a warning with the NumPy backend if CuPy is not installed |
+| unset | the GPU (CuPy) when CuPy and a GPU, NVIDIA or AMD, are present, otherwise NumPy on the CPU |
+| `cupy` | the GPU; an error if no device is visible, and a warning with the NumPy backend if CuPy is not installed |
 | `numpy` | the NumPy CPU backend |
 
 Precision follows the backend unless `Config(dtype=...)` says otherwise:
@@ -91,6 +103,7 @@ import os
 os.environ["GEOSWE_BACKEND"] = "numpy"       # or "cupy"; before importing geoswe
 import geoswe
 print(geoswe.get_backend(), geoswe.USING_CUPY)
+print(geoswe.gpu_platform())                 # "cuda" (NVIDIA), "hip" (AMD ROCm), or None on the CPU
 ```
 
 `geoswe.set_backend(...)` only works before any solver module has been
