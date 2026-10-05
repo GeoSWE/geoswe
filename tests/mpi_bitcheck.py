@@ -5,11 +5,17 @@
     mpirun -n 2 python tests/mpi_bitcheck.py --tag <label>
 
 Runs a tiny synthetic lake through CompressedSolver and prints a per-rank md5
-of the raw state bytes. The digests must be IDENTICAL across the config
-matrix {SWE_HALO_OVERLAP=0,1} x {SWE_CFL_ASYNC=0,1}: the halo-overlap split
-(band flag in is_active bit 1), the pinned host-staged halo, and the
+of the state of the cells the rank OWNS. The digests must be IDENTICAL across
+the config matrix {SWE_HALO_OVERLAP=0,1} x {SWE_CFL_ASYNC=0,1}: the halo-overlap
+split (band flag in is_active bit 1), the pinned host-staged halo, and the
 Iallreduce dt are all numerics-neutral by construction, and this is the test
 that proves it on real MPI traffic.
+
+``md5_with_ghosts`` additionally hashes the stored ghost ring. That one is not
+expected to match across the matrix and is printed for diagnosis only: the ring
+holds the neighbours' edge and the outer boundary, is refreshed on a different
+schedule when the overlap split is on, and is never read after the step that
+consumed it.
 """
 import os, sys, io, re, argparse, contextlib, hashlib
 from pathlib import Path
@@ -75,12 +81,21 @@ with contextlib.redirect_stdout(buf):
 m = re.findall(r"steps=(\d+)", buf.getvalue())
 steps = int(m[-1]) if m else -1
 
-dig = hashlib.md5()
+# Hash the cells this rank owns (is_active != 0), not the stored ghost ring. The ring is the
+# rank's copy of its neighbours' edge and the outer boundary; it is written by the halo exchange
+# and the ghost BC, never stepped, and nothing reads a stale entry. Its bytes are NOT
+# config-invariant: with the fused step and SWE_HALO_OVERLAP=1 the ring is refreshed on a
+# different schedule, so hashing it reports a difference where the solution has none.
+own = cp.asnumpy(csol.is_active) != 0
+dig, dig_all = hashlib.md5(), hashlib.md5()
 for arr in (csol.q0, csol.q1, csol.q2):
-    dig.update(cp.asnumpy(arr).tobytes())
+    host = cp.asnumpy(arr)
+    dig.update(host[own].tobytes())
+    dig_all.update(host.tobytes())
 line = (f"[geoswe-bitcheck {a.tag}] rank={rank} N={N} steps={steps} "
         f"ovl={os.environ.get('SWE_HALO_OVERLAP','<unset>')} "
-        f"async={os.environ.get('SWE_CFL_ASYNC','<default:1>')} md5={dig.hexdigest()}")
+        f"async={os.environ.get('SWE_CFL_ASYNC','<default:1>')} md5={dig.hexdigest()} "
+        f"owned={int(own.sum())} md5_with_ghosts={dig_all.hexdigest()}")
 for r in range(N):
     comm.Barrier()
     if r == rank:
