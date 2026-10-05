@@ -4,7 +4,7 @@ Small, self-contained examples. Examples 1–4 and 7 run on the **CPU** (NumPy b
 no GPU needed); examples 5–6 use the **GPU** (CuPy, and MPI for ex05).
 
 Force the CPU backend with `GEOSWE_BACKEND=numpy`. With a GPU + `pip install
-"geoswe[gpu]"` the same code runs on CuPy.
+"geoswe[gpu]"` (`"geoswe[gpu-rocm]"` on an AMD GPU) the same code runs on CuPy.
 
 | Example | What it shows | Backend | Run |
 |---|---|---|---|

@@ -85,7 +85,7 @@ Change what is simulated or written. Read by the compressed replay path (`run_ca
 
 | Variable | `SWE_` alias | Default | Effect | Read in |
 |---|---|---|---|---|
-| `GEOSWE_BACKEND` |  | `` | array backend: "cupy" (default) or "numpy"; falls back to NumPy when CuPy is absent | `backend.py` |
+| `GEOSWE_BACKEND` |  | `` | array backend: "cupy" (default; NVIDIA or AMD GPU) or "numpy"; falls back to NumPy when CuPy is absent | `backend.py` |
 | `GEOSWE_FRICTION_QUAD` | `SWE_FRICTION_QUAD` | `1` | 0 = linearized point-implicit friction root; unset = quadratic root (every published run) | `compressed_solver.py` |
 | `GEOSWE_GA` |  | `os.environ.get("GA", "1` | 1 (default) = Green-Ampt infiltration on in the driver; 0 = off | `runlib/driver.py` |
 | `GEOSWE_GA_DMAX` | `SWE_GA_DMAX` | `3.0` | Green-Ampt cumulative-infiltration cap (m) | `runlib/driver.py` |
@@ -124,6 +124,7 @@ Numerics-neutral: every switch is verified bit-identical on the benchmark cases,
 |---|---|---|---|---|
 | `GEOSWE_FROMDENSE_BUILD_STAGGER` | `SWE_FROMDENSE_BUILD_STAGGER` | `1` | stagger the dense->compressed build across N groups to bound peak memory | `compressed_solver.py` |
 | `GEOSWE_FROMDENSE_SIGMA_DUMMY` | `SWE_FROMDENSE_SIGMA_DUMMY` | `` | 1 = length-1 sigma placeholder when no sigma storage is used | `compressed_solver.py` |
+| `GEOSWE_HIP_FP_CONTRACT` |  | `off` | AMD GPUs only: how the ROCm compiler may fuse `a*b + c` into one multiply-add. `off` (default) never, `on` within one source expression, `fast` at the optimizer's discretion. `fast` breaks the bit-identity of the fused and split steps; see [AMD GPUs](amd_gpus.md) | `backend.py` |
 | `GEOSWE_SIGMA_FREE_CFL` |  | `os.environ.get("SIGMA_FREE_CFL` | 1 = ignore sub-grid storage in the CFL (driver) | `runlib/driver.py` |
 | `SWE_ALLOW_LIMITER_DRIFT` |  | `` | 1 = permit a limiter/kernel-template mismatch instead of failing loudly (never for production) | `rhs_cuda.py` |
 | `SWE_BED_GRAD_LIMITER` |  | `central` | bed-gradient limiter: central (default) or a limited form | `compressed_rhs.py` |
@@ -133,7 +134,7 @@ Numerics-neutral: every switch is verified bit-identical on the benchmark cases,
 | `SWE_DENSE_FUSE_CFL` |  | `0` | 1 = reduce the next CFL inside the dense fused step (default 0) | `solver.py` |
 | `SWE_DENSE_FUSE_STEP` |  | `1` | 1 (default) = fused residual+update on the dense path | `solver.py` |
 | `SWE_DENSE_HALO_OVERLAP` |  | `1` | 1 (default) = overlap the dense halo exchange with interior compute (needs an inside mask) | `solver.py` |
-| `SWE_DENSE_MAXRREG` |  | `auto` | register cap for the dense residual kernel: auto (default) / integer / 0 | `rhs_cuda.py` |
+| `SWE_DENSE_MAXRREG` |  | `auto` | register cap for the dense residual kernel: auto (default) / integer / 0. NVIDIA only; ignored with a warning on AMD GPUs | `rhs_cuda.py` |
 | `SWE_DRY_SKIP` |  | `` | 1 (default) = early-out for all-dry cells | `compressed_rhs.py` |
 | `SWE_FLAT_BEDGRAD_PRECOMP` |  | `0` | 1 = precompute bed gradients (default 0: computed in-kernel) | `compressed_rhs.py` |
 | `SWE_FLAT_CFL_EARLY` |  | `0` | 1 = compute the CFL before the forcings stage when the fused CFL is off | `compressed_solver.py` |
@@ -142,7 +143,7 @@ Numerics-neutral: every switch is verified bit-identical on the benchmark cases,
 | `SWE_FLAT_FUSE_CFL` |  | `1` | 1 (default) = fold the next-step CFL reduction into the fused compressed step | `compressed_rhs.py` |
 | `SWE_FLAT_FUSE_CFL_CHECK` |  | `0` | 1 = verify the fused CFL against the separate kernel every step (debug; slow) | `compressed_solver.py` |
 | `SWE_FLAT_FUSE_STEP` |  | `1` | 1 (default) = fused residual+update on the compressed path | `compressed_rhs.py` |
-| `SWE_FLAT_MAXRREG` |  | `auto` | register cap for the compressed residual kernel: auto (default) / integer / 0 | `compressed_solver.py` |
+| `SWE_FLAT_MAXRREG` |  | `auto` | register cap for the compressed residual kernel: auto (default) / integer / 0. NVIDIA only; ignored with a warning on AMD GPUs | `compressed_solver.py` |
 | `SWE_FLAT_REG2` |  | `1` | 1 (default) = regular-neighbour fast path | `compressed_rhs.py` |
 | `SWE_FLAT_REG2_SPLIT` |  | `1` | 1 (default) = split regular/irregular launches | `compressed_rhs.py` |
 | `SWE_FLAT_REGULAR_FASTPATH` |  | `0` | legacy name of the regular-neighbour path (default 0) | `compressed_rhs.py` |
@@ -150,7 +151,7 @@ Numerics-neutral: every switch is verified bit-identical on the benchmark cases,
 | `SWE_FLAT_RHS_FILL` |  | `0` | 0 (default) = skip the residual memsets | `compressed_solver.py` |
 | `SWE_FUSE_FORCINGS` |  | `1` | 1 (default) = one post-step kernel for rain/friction/wet-dry/depth-max | `compressed_solver.py` |
 | `SWE_FUSE_XY` |  | `1` | 1 (default) = fused x/y residual on the dense path | `solver.py` |
-| `SWE_HALO_CUDA_AWARE` |  | `0` | 1 = CUDA-aware MPI halo; 0 = host-staged (MIG, no peer access) | `compressed_solver.py` |
+| `SWE_HALO_CUDA_AWARE` |  | `0` | 1 = GPU-aware MPI halo (CUDA-aware MPI on NVIDIA; Cray MPICH with `MPICH_GPU_SUPPORT_ENABLED=1` on AMD); 0 = host-staged (MIG, no peer access) | `compressed_solver.py` |
 | `SWE_HALO_FASTPACK` |  | `1` | 1 (default) = one pack/unpack kernel per halo face | `compressed_solver.py` |
 | `SWE_HALO_OVERLAP` |  | `1` | 1 (default) = overlap the compressed halo exchange with interior compute | `compressed_solver.py` |
 | `SWE_POOL_TRIM_EVERY` |  | `0` | trim the CuPy memory pool every N steps | `compressed_solver.py` |

@@ -44,7 +44,7 @@ mpirun -n 4 python examples/ex05_scaling_bench.py --mode weak --ny-per-rank 1800
 mpirun -n 4 python examples/ex05_scaling_bench.py --mode strong --ny-total 30000
 ```
 
-Needs `pip install "geoswe[gpu,mpi]"`.
+Needs `pip install "geoswe[gpu,mpi]"` (`"geoswe[gpu-rocm,mpi]"` on an AMD GPU).
 
 ### `ex06_pluvial_flood_realcase.py` — real-terrain flood
 A pluvial flood on a real 8×8 km patch of 10 m Cook County, Illinois terrain

@@ -16,6 +16,7 @@ Backend control
 
 .. autofunction:: set_backend
 .. autofunction:: get_backend
+.. autofunction:: gpu_platform
 .. autofunction:: to_host
 .. autofunction:: to_device
 .. autofunction:: sync

@@ -7,9 +7,13 @@ step. One MPI rank drives one GPU.
 ## Running
 
 ```bash
-pip install "geoswe[gpu,mpi]"
+pip install "geoswe[gpu,mpi]"       # "geoswe[gpu-rocm,mpi]" on AMD GPUs
 mpirun -n 4 python my_run.py        # 4 ranks -> 4 GPUs
 ```
+
+Under Slurm the scheduler can hand each rank its own device, on either vendor:
+`srun -n 4 --gpus-per-task=1 --gpu-bind=closest python my_run.py`. The pinning
+line in the script below then sees one device per rank and is a no-op.
 
 In the script, pass the communicator and a process grid to the solver:
 
@@ -53,6 +57,11 @@ On hardware without GPU peer access (e.g. MIG slices), force host-staged halo
 exchange with `SWE_HALO_CUDA_AWARE=0`. CUDA-aware MPI (`=1`) is faster on
 NVLink-connected GPUs. See the [configuration reference](configuration.md).
 ```
+
+On AMD GPUs the same variable selects GPU-aware MPI. With HPE Cray MPICH that
+also needs `MPICH_GPU_SUPPORT_ENABLED=1` and an `mpi4py` linked against the GPU
+transport library; GeoSWE falls back to host staging, with a warning, when Cray
+MPICH is running without its GPU support. See [AMD GPUs](amd_gpus.md).
 
 ## Large domains
 
