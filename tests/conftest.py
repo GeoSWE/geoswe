@@ -15,6 +15,10 @@
   and the failure then lands inside the test as ``OutOfMemoryError`` or as
   ``Failed to find CUDA headers``.
   ``pytest -m "not gpu"`` deselects them explicitly.
+
+"GPU" means either vendor: the same probe runs on NVIDIA devices (CUDA) and on AMD
+ones (CuPy's ROCm build), where the compile step fails when the ROCm module is not
+loaded.
 """
 import os
 import subprocess
@@ -40,7 +44,8 @@ _PROBE_BYTES = 32 << 20
 # device), and a broken CUDA stack can abort the interpreter. The steps mirror
 # what the GPU tests need: device memory, a compiled CuPy kernel, and a compiled
 # raw CUDA kernel. Compilation is the step that fails when the CUDA toolkit
-# headers are missing, which allocation alone does not catch.
+# headers are missing (on AMD: when `hipcc` is not on PATH), which allocation
+# alone does not catch.
 _PROBE = r"""
 import cupy
 
@@ -70,24 +75,26 @@ def _cuda_usable() -> "tuple[bool, str]":
         import cupy
     except Exception as exc:   # ImportError, or a broken CuPy/CUDA install
         return False, f"CuPy is not importable ({type(exc).__name__}: {exc})"
+    amd = bool(getattr(cupy.cuda.runtime, "is_hip", False))    # CuPy's ROCm build
     try:
         if cupy.cuda.runtime.getDeviceCount() < 1:
-            return False, "CuPy is installed but no CUDA device is visible"
+            return False, "CuPy is installed but no GPU is visible"
     except Exception as exc:   # CUDARuntimeError: no driver, no device
-        return False, f"no usable CUDA driver or device ({type(exc).__name__}: {exc})"
+        return False, f"no usable GPU driver or device ({type(exc).__name__}: {exc})"
     try:
         probe = subprocess.run([sys.executable, "-c", _PROBE],
                                capture_output=True, text=True, timeout=300)
     except Exception as exc:   # TimeoutExpired, OSError
-        return False, f"the CUDA probe could not run ({type(exc).__name__}: {exc})"
+        return False, f"the GPU probe could not run ({type(exc).__name__}: {exc})"
     if probe.returncode != 0:
         lines = probe.stdout.strip().splitlines() or probe.stderr.strip().splitlines()
         detail = (lines[-1] if lines else "the probe failed").rstrip(".")
         # CuPy's own message carries the remedy for a missing toolkit; its
         # out-of-memory message does not, so supply one.
-        hint = (" Free the device (see nvidia-smi) or point CUDA_VISIBLE_DEVICES at a free one."
+        tool, var = ("rocm-smi", "HIP_VISIBLE_DEVICES") if amd else ("nvidia-smi", "CUDA_VISIBLE_DEVICES")
+        hint = (f" Free the device (see {tool}) or point {var} at a free one."
                 if "OutOfMemoryError" in detail else "")
-        return False, (f"a CUDA device is visible but this environment cannot {detail}.{hint}")
+        return False, (f"a GPU is visible but this environment cannot {detail}.{hint}")
     return True, ""
 
 

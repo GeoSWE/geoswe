@@ -17,6 +17,7 @@ import sys
 import os, json, time, threading
 import numpy as np
 import cupy as cp
+from .backend import elementwise_kernel, nvidia_compute_capability, raw_kernel
 from .compressed_rhs import (build_flat_srm_hllc_kernel, build_flat_srm_hllc_gathered_kernel,
                              nbr_to_int16_delta, bedgrad_precomp_enabled,
                              build_flat_srm_hllc_kernel_pg, build_flat_bedgrad_kernel,
@@ -619,18 +620,15 @@ class CompressedStepper:
         # sets the block size for the same launches only (other kernels keep self.block).
         _cap = os.environ.get("SWE_FLAT_MAXRREG", "auto")
         if _cap == "auto":   # 40 is bit-identical on sm_90 (H100) only (NOT on sm_120 Blackwell) -> gate on arch
-            try:
-                _cc = str(cp.cuda.Device().compute_capability)
-            except Exception:
-                _cc = ""
-            _cap = "40" if _cc == "90" else ""
+            # NVIDIA only: an AMD gfx90a card reports "90" through CuPy as well
+            _cap = "40" if nvidia_compute_capability() == "90" else ""
         self._kopts = (f"-maxrregcount={int(_cap)}",) if _cap else ()
         self.block_rhs = int(os.environ.get("SWE_FLAT_RHS_BLOCK", "0") or 0) or None
         self.kern_rhs_g = build_flat_srm_hllc_gathered_kernel(cp.float32, no_sigma=self.no_sigma)
         self.bidx = None   # (n_bnd,) int32 boundary cells, set for halo-overlap
-        self.kern_fric = cp.RawKernel(_FRICTION_FLAT_SRC, "friction_wd_flat")
-        self.kern_drain = cp.RawKernel(_DRAIN_CAP_SRC, "drain_cap")   # target-depth (per-cell) drain BC
-        self.kern_infil = cp.RawKernel(_INFILTRATE_SRC, "infiltrate_flat")  # landcover infiltration/recession
+        self.kern_fric = raw_kernel(_FRICTION_FLAT_SRC, "friction_wd_flat")
+        self.kern_drain = raw_kernel(_DRAIN_CAP_SRC, "drain_cap")   # target-depth (per-cell) drain BC
+        self.kern_infil = raw_kernel(_INFILTRATE_SRC, "infiltrate_flat")  # landcover infiltration/recession
         # cfl_no_sigma: the dense Pinellas runner computes the CFL dt with Σ removed
         # (SIGMA_FREE_CFL: σ-storage still scales the axpy/RHS, but the dt ignores it so
         # narrow channels don't shrink dt). Use the ns CFL kernel even when σ is kept.
@@ -648,7 +646,7 @@ class CompressedStepper:
         self.cfl_linf = bool(cfl_linf)
         if cfl_linf:
             _cfl_src = _cfl_src.replace("sqrtf(u*u + v*v)", "fmaxf(fabsf(u), fabsf(v))")
-        self.kern_cfl = cp.RawKernel(_cfl_src, _cfl_name)
+        self.kern_cfl = raw_kernel(_cfl_src, _cfl_name)
         self._sig_dummy = cp.zeros(1, cp.float32)   # length-1: unread sigma/inv_sig pointer when no_sigma
         self._ones1 = cp.ones(1, cp.float32)        # broadcast ×1 for the axpy when no_sigma
         self.block = 256
@@ -662,11 +660,11 @@ class CompressedStepper:
         self.r1 = cp.zeros(self.N, cp.float32)
         self.r2 = cp.zeros(self.N, cp.float32)
         self._cfl_bits = cp.zeros(1, cp.uint32)
-        self._axpy = cp.ElementwiseKernel(
+        self._axpy = elementwise_kernel(
             "float32 dt, float32 r0, float32 r1, float32 r2, float32 inv_sig, uint8 act",
             "float32 q0, float32 q1, float32 q2",
             "if (act) { q0 += dt*r0*inv_sig; q1 += dt*r1; q2 += dt*r2; }", "axpy_flat_sigma")
-        self._rain_add = cp.ElementwiseKernel(
+        self._rain_add = elementwise_kernel(
             "raw float32 rate_row, int32 lk, uint8 act", "float32 r0",
             "if (act) r0 += rate_row[lk];", "rain_add_flat")   # int32 lk (native grid < 2^31): halves the lookup
         _sigma_forms = {"auto": "q0[k] += dt * rr0 * inv_sig[k * sig_stride];",
@@ -674,7 +672,7 @@ class CompressedStepper:
                         "fma": "q0[k] = fmaf(__fmul_rn(dt, rr0), inv_sig[k * sig_stride], q0[k]);"}
         _src_ff = _FUSED_FORCINGS_SRC.replace("__FORCINGS_SIGMA_UPDATE__",
                                               _sigma_forms[os.environ.get("SWE_FLAT_FORCINGS_SIGMA", "auto")])
-        self.kern_fused = cp.RawKernel(_src_ff, "fused_forcings_flat")
+        self.kern_fused = raw_kernel(_src_ff, "fused_forcings_flat")
         self._dummy_f1 = cp.zeros(1, cp.float32)    # placeholder for absent rain/max args
         self._dummy_i1 = cp.zeros(1, cp.int32)
 
@@ -788,7 +786,7 @@ class CompressedStepper:
         build_flat_mark_canon_kernel()(self.grid, (self.block,),
                                        (self.nbr, self.is_active,
                                         np.int32(self.N), np.int32(self._rstride)))
-        cp.ElementwiseKernel("", "uint8 a", "if ((a & 48) == 48) a |= 64;",
+        elementwise_kernel("", "uint8 a", "if ((a & 48) == 48) a |= 64;",
                              "flat_mark_reg1_bit6")(self.is_active)   # in place, no temporaries
         self.n_regular = self._count_bits(64, 64)
         if self.n_regular == 0:
@@ -837,13 +835,13 @@ class CompressedStepper:
             assert "idx[t]" in _src and "act, const int* __restrict__ idx" in _src
             if self.cfl_linf:
                 _src = _src.replace("sqrtf(u*u + v*v)", "fmaxf(fabsf(u), fabsf(v))")
-            self.kern_cfl_idx = cp.RawKernel(_src, "cfl_lammax_flat_idx_ns")
+            self.kern_cfl_idx = raw_kernel(_src, "cfl_lammax_flat_idx_ns")
             self.kern_cfl_idx_sig = None
             if not self.cfl_no_sigma:
                 _src2 = _src.replace("cfl_lammax_flat_idx_ns", "cfl_lammax_flat_idx").replace(
                     "float lam = (sqrtf(u*u + v*v) + c);", "float lam = (sqrtf(u*u + v*v) + c) * inv_sig[k];").replace(
                     "float lam = (fmaxf(fabsf(u), fabsf(v)) + c);", "float lam = (fmaxf(fabsf(u), fabsf(v)) + c) * inv_sig[k];")
-                self.kern_cfl_idx_sig = cp.RawKernel(_src2, "cfl_lammax_flat_idx")
+                self.kern_cfl_idx_sig = raw_kernel(_src2, "cfl_lammax_flat_idx")
         else:
             self.kern_fstep = build_flat_fused_step_kernel(pre_b, _WETDRY_KEEP_H, stride=stride,
                                                            no_sigma=self.no_sigma, tag=tag,
@@ -1192,8 +1190,8 @@ class CompressedHalo:
         self._fp_ready = True
         if not self._fp_on:
             return
-        self._k_pack = cp.RawKernel(_HALO_PACK_SRC, "halo_pack")
-        self._k_unpack = cp.RawKernel(_HALO_PACK_SRC, "halo_unpack")
+        self._k_pack = raw_kernel(_HALO_PACK_SRC, "halo_pack")
+        self._k_unpack = raw_kernel(_HALO_PACK_SRC, "halo_unpack")
         for f in self.faces:
             M = self.ngh * f["P"]
             smap = cp.full(M, -1, cp.int32); smap[f["soff"] * f["P"] + f["sperp"]] = f["sfi"]
@@ -1522,7 +1520,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
 
     ring_on = ring is not None
     if ring_on:
-        rkern = cp.RawKernel(_ring_flat_src(ring["NG"]), "ring_bc_flat")
+        rkern = raw_kernel(_ring_flat_src(ring["NG"]), "ring_bc_flat")
         rflat = ring["rflat"]; rbed = ring["rbed"]; rwg = ring["rwg"]; nring = int(ring["n"])
         rblk = 256; rgrid = (nring + rblk - 1)//rblk
         stage_buf = cp.empty(int(ring["NG"]), cp.float32)
@@ -1546,7 +1544,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
             sp_keep = _kf[sp_idx].copy(); sp_amb = _af[sp_idx].copy(); sp_n = int(sp_idx.size)
             sponge["keep_f"] = None; sponge["amb_f"] = None; _kf = None; _af = None
             cp.get_default_memory_pool().free_all_blocks()
-        _spkern = cp.RawKernel(_SPONGE_BAND_SRC, "sponge_band"); _spgrid = (sp_n + 255) // 256
+        _spkern = raw_kernel(_SPONGE_BAND_SRC, "sponge_band"); _spgrid = (sp_n + 255) // 256
     rain_on = rain is not None
     # GEOSWE_RAIN_NPZ: replace the cache's baked rain RATES with another deck's. The
     # cache's per-active-cell lookup is reused, so the npz must be on the SAME native
@@ -1612,16 +1610,16 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
             gd_Fmax = cp.full(gd_F.shape, 3.0e38, cp.float32)       # no cap (legacy behaviour)
         gd_inv_tau = ga_drain.get("inv_tau")
         gd_mode = ga_drain.get("mode", "fused")
-        _gakern = cp.RawKernel(_GA_DRAIN_FLAT_SRC, "ga_drain_flat") if gd_mode == "fused" \
-            else (cp.RawKernel(_GA_FLAT_SRC, "ga_flat") if gd_mode == "ga"
-                  else cp.RawKernel(_DRAIN_TAU_FLAT_SRC, "drain_tau_flat"))
+        _gakern = raw_kernel(_GA_DRAIN_FLAT_SRC, "ga_drain_flat") if gd_mode == "fused" \
+            else (raw_kernel(_GA_FLAT_SRC, "ga_flat") if gd_mode == "ga"
+                  else raw_kernel(_DRAIN_TAU_FLAT_SRC, "drain_tau_flat"))
         if rank == 0:
             say(f"  [compressed] GA/drain ON (mode={gd_mode})")
     clamp_on = clamp is not None and clamp.get("idx") is not None and int(clamp["idx"].size) > 0
     if clamp_on:
         cl_idx = clamp["idx"].astype(cp.int32); cl_hmax = cp.asarray(clamp["hmax"], cp.float32)
         cl_n = int(cl_idx.size); cl_grid = (cl_n + 63) // 64
-        _clkern = cp.RawKernel(_STAGE_CLAMP_FLAT_SRC, "stage_clamp_flat")
+        _clkern = raw_kernel(_STAGE_CLAMP_FLAT_SRC, "stage_clamp_flat")
         if rank == 0:
             say(f"  [compressed] stage clamp ON: {cl_n} cells this rank")
     cs_sampler = None; next_cs = float("inf")
@@ -1677,7 +1675,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
     # all-active max can briefly spike (the interior never sees those values).
     _interior_act = (act > 0) & cp.asarray((_ijh[:, 0] >= ngh) & (_ijh[:, 0] < ngh + nxl) &
                                            (_ijh[:, 1] >= ngh) & (_ijh[:, 1] < ngh + nyl))  # de-halo BOTH axes
-    _hmax_kern = cp.RawKernel(_HMAX_MASKED_SRC, "hmax_masked")
+    _hmax_kern = raw_kernel(_HMAX_MASKED_SRC, "hmax_masked")
     _hmax_bits = cp.zeros(1, cp.uint32)
     _interior_u8 = _interior_act.view(cp.uint8)          # bool is 1 byte; free reinterpret
     def _interior_hmax(q0_):
@@ -1954,7 +1952,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
     _uk = _ui = _un = None; _ug = ()
     if _re is not None and _re[2] == "uv":
         _ui, _un = _re[0], _re[1]
-        _uk = cp.RawKernel(_GHOST_UV_SRC, "ghost_uv")
+        _uk = raw_kernel(_GHOST_UV_SRC, "ghost_uv")
         _ug = ((int(_ui.size) + 255) // 256,)
         _re = None
     # CFL fusion: the fused kernels reduce the next step's lambda while writing the state, so

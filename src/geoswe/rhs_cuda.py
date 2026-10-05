@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import os
 
-from .backend import USING_CUPY
+from .backend import USING_CUPY, nvidia_compute_capability, raw_kernel
 
 
 # 7-cell stencil per direction: hX[0..6] = arr[i-3 .. i+3].
@@ -1491,26 +1491,26 @@ if USING_CUPY:
              .replace("__SLP_DEFINE__", macros)
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname)
+        return raw_kernel(s, kname)
 
     def _build_wb(t_c, kname):
         s = (_FUSED_RHS_WB_SRC
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname)
+        return raw_kernel(s, kname)
 
     def _build_srm(t_c, kname):
         # Now uses face-frame WB-fixed template (replaces buggy _FUSED_RHS_WB_SRM_SRC).
         s = (_FUSED_RHS_WB_SRM_LF_SRC
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname)
+        return raw_kernel(s, kname)
 
     def _build_hllc_first(t_c, kname):
         s = (_FUSED_RHS_HLLC_FIRST_SRC
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname)
+        return raw_kernel(s, kname)
 
     _LIMITER_GRADS = (
         "    const __T__ gz_c_x  = _LIM((b_c  - b_l ) * inv_dx, (b_r  - b_c ) * inv_dx);\n"
@@ -1629,11 +1629,8 @@ if USING_CUPY:
         arithmetic). Default unset -> identical build to before."""
         _c = os.environ.get("SWE_DENSE_MAXRREG", "auto")
         if _c == "auto":   # cap 40 is bit-identical on sm_90 (H100) only; on sm_120 (Blackwell) it was NOT -> off
-            try:
-                _cc = cp.cuda.Device().compute_capability
-            except Exception:
-                _cc = ""
-            _c = "40" if str(_cc) == "90" else ""
+            # NVIDIA only: an AMD gfx90a card reports "90" through CuPy as well
+            _c = "40" if nvidia_compute_capability() == "90" else ""
         return (f"-maxrregcount={int(_c)}",) if _c else ()
 
     def _build_srm_hllc(t_c, kname):
@@ -1641,14 +1638,14 @@ if USING_CUPY:
              .replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname, options=_dense_kopts())
+        return raw_kernel(s, kname, options=_dense_kopts())
 
     def _build_srm_hllc_compact(t_c, kname):
         s = (_hybrid_prefix() + _maybe_dry_skip(_FUSED_RHS_WB_SRM_HLLC_COMPACT_SRC)
              .replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname, options=_dense_kopts())
+        return raw_kernel(s, kname, options=_dense_kopts())
 
     # NO-SIGMA variants of the SRM-HLLC kernels. When the IGR entropic pressure Σ is
     # identically zero (pde='baseline', i.e. plain SWE -- which is every coastal/pluvial
@@ -1667,14 +1664,14 @@ if USING_CUPY:
              .replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname, options=_dense_kopts())
+        return raw_kernel(s, kname, options=_dense_kopts())
 
     def _build_srm_hllc_compact_ns(t_c, kname):
         s = (_hybrid_prefix() + _maybe_dry_skip(_no_sigma_src(_FUSED_RHS_WB_SRM_HLLC_COMPACT_SRC))
              .replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname, options=_dense_kopts())
+        return raw_kernel(s, kname, options=_dense_kopts())
 
     # ------------------------------------------------------------------------------
     # DENSE FUSED STEP (SWE_DENSE_FUSE_STEP=1): compact SRM-HLLC residual + update in one
@@ -1977,7 +1974,7 @@ void dense_carry_outside(
         """lambda of listed cells (padded linear index), atomically maxed into cfl_bits."""
         key = ("cellslam",)
         if key not in _dfstep_kernels:
-            _dfstep_kernels[key] = cp.RawKernel(r"""
+            _dfstep_kernels[key] = raw_kernel(r"""
 extern "C" __global__
 void cells_lam(const float* __restrict__ q0, const float* __restrict__ q1, const float* __restrict__ q2,
     const int* __restrict__ cells, const int n, const float g, const float h_cfl, unsigned int* __restrict__ cfl_bits)
@@ -2017,7 +2014,7 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
     q0[idx] = h; q1[idx] = hu; q2[idx] = hv;
 }
 """)
-            _dfstep_kernels[key] = cp.RawKernel(src, "ring_forcings")
+            _dfstep_kernels[key] = raw_kernel(src, "ring_forcings")
         return _dfstep_kernels[key]
 
     def _dfstep_storage(sig_new, tail_new, curve=False):
@@ -2077,7 +2074,7 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
              + (_IN_LIST_FN if (force and cfl) else "")
              + _maybe_dry_skip(src).replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
                .replace("__T__", "float").replace("__KNAME__", kname))
-        k = cp.RawKernel(s, kname, options=_dense_kopts())
+        k = raw_kernel(s, kname, options=_dense_kopts())
         _dfstep_kernels[key] = k
         return k
 
@@ -2120,7 +2117,7 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
         s2 = (_hybrid_prefix() + f"#define WETDRY_KEEP_H {int(wetdry_keep_h)}\n"
               + _maybe_dry_skip(src).replace("__BED_GRADIENT_BLOCK__", _bed_gradient_block())
                 .replace("__T__", "float").replace("__KNAME__", kname))
-        k = cp.RawKernel(s2, kname, options=_dense_kopts())
+        k = raw_kernel(s2, kname, options=_dense_kopts())
         _dfstep_kernels[key] = k
         return k
 
@@ -2198,7 +2195,7 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
                 src = (src[:_sig_end] + ",\n    const int* __restrict__ clist, const int n_list"
                        + src[_sig_end:]).replace(pro_old, pro_new).replace(f"void {name}(", f"void {name}_lst(")
                 name = name + "_lst"
-            _dfstep_kernels[key] = cp.RawKernel(src, name)
+            _dfstep_kernels[key] = raw_kernel(src, name)
         return _dfstep_kernels[key]
 
     def _build_audusse_hllc(t_c, kname):
@@ -2210,7 +2207,7 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
         s = (prefix + _FUSED_RHS_WB_AUDUSSE_HLLC_SRC
              .replace("__T__", t_c)
              .replace("__KNAME__", kname))
-        return cp.RawKernel(s, kname)
+        return raw_kernel(s, kname)
 
     _fused_rhs_kernels = {}
     # Capture the bed-grad limiter env value at module-import time so we

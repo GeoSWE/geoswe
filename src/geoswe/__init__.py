@@ -2,7 +2,7 @@
 
 A GPU-accelerated (CuPy + mpi4py) finite-volume solver for the 2D nonlinear
 shallow-water equations, built for flood modeling from county to continental
-scale, with a transparent NumPy CPU fallback.
+scale, on NVIDIA (CUDA) and AMD (ROCm) GPUs, with a transparent NumPy CPU fallback.
 
 Highlights
 ----------
@@ -36,6 +36,7 @@ from .backend import (
     xp,
     set_backend,
     get_backend,
+    gpu_platform,
     to_host,
     to_device,
     sync,
@@ -53,6 +54,7 @@ __all__ = [
     "xp",
     "set_backend",
     "get_backend",
+    "gpu_platform",
     "to_host",
     "to_device",
     "sync",
@@ -89,8 +91,8 @@ def __getattr__(name):
             from .compressed_solver import CompressedSolver
         except ImportError as e:  # clear message on CPU-only installs
             raise ImportError(
-                "geoswe.CompressedSolver requires the GPU extra: "
-                "pip install 'geoswe[gpu]'"
+                "geoswe.CompressedSolver requires a GPU extra: "
+                "pip install 'geoswe[gpu]' (NVIDIA) or 'geoswe[gpu-rocm]' (AMD)"
             ) from e
         return CompressedSolver
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

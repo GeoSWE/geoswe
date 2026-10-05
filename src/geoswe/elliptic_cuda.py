@@ -22,7 +22,7 @@ Total: 2 floats/cell (down from 5).
 """
 from __future__ import annotations
 
-from .backend import xp, USING_CUPY
+from .backend import xp, USING_CUPY, raw_kernel
 
 
 _JACOBI_FUSED_SRC = r"""
@@ -111,7 +111,7 @@ if USING_CUPY:
 
     def _build(src, t_c, kname):
         s = src.replace("__T__", t_c).replace("__KNAME__", kname)
-        return cp.RawKernel(s, kname)
+        return raw_kernel(s, kname)
 
     _kernels = {
         cp.float64: {

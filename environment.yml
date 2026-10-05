@@ -20,5 +20,6 @@ dependencies:
   - pip:
       # GPU. The CUDA 12 build with its headers ([ctk]) runs on CUDA 12 and CUDA 13
       # drivers without a system toolkit. Keep exactly one CuPy build; omit for CPU-only.
+      # On an AMD GPU replace this line with cupy-rocm-7-0>=14.0 (docs/amd_gpus.md).
       - cupy-cuda12x[ctk]>=14.0
       - mpi4py>=3.1
