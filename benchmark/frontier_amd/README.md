@@ -14,6 +14,8 @@ differently on AMD hardware.
 | `partition_check.py` | one md5 of the global solution, for any rank count and halo configuration |
 | `run_scaling_640m.sbatch` | two nodes: the [`scaling_640m`](../scaling_640m/) harness at 640 M cells per rank, N = 1 to 16 |
 | `summarize_640m.py` | the tables of that job, from its CSV files |
+| `run_weak_1b.sbatch` | a power of two of nodes: weak scaling at one billion cells per GCD, from one GCD to all of them (128 nodes: 1.024 trillion cells) |
+| `node_check.py` | that job's pre-flight check of every node's GCDs |
 
 ## Setting up
 
@@ -62,6 +64,20 @@ python benchmark/frontier_amd/summarize_640m.py $GEOSWE_SCRATCH/runs/geoswe-640m
 
 The two-node job takes about 45 minutes with three timed windows per point
 (`REPEATS`); `STAGES` selects among `check`, `weak`, `strong` and `defaults`.
+
+```bash
+mkdir -p $GEOSWE_SCRATCH/stage
+tar -C . -cf $GEOSWE_SCRATCH/stage/geoswe-stage.tar .venv src benchmark/scaling_640m benchmark/frontier_amd
+sbatch -A <project> -p batch -N 130 benchmark/frontier_amd/run_weak_1b.sbatch
+```
+
+The billion-cell job runs the halved sizes side by side on disjoint nodes, then
+all nodes together, with one timed window per point. It takes 11 minutes on four
+nodes and on 130 alike: more nodes add points to the first wave, not waves. It
+unpacks the tar file onto every node, so that a thousand Python processes do not
+start from the home file system, and checks every GCD first. It uses the largest
+power of two of nodes that pass, which is why the line above asks for two more
+than 128. Rebuild the tar file after changing the sources.
 
 ## Results on one node
 
@@ -199,3 +215,55 @@ two ranks over halo overlap on / off and asynchronous `dt` on / off: the
 owned-cell digests agree. `partition_check.py` then gives the same digest on one
 rank and on sixteen ranks across the two nodes, for both layouts, with the
 host-staged and with the GPU-aware halo.
+
+## Weak scaling at one billion cells per GCD
+
+2026-10-06, `amd-cupy` 13.5.1, `run_weak_1b.sbatch` on 130 nodes, of which it
+used 128. Each rank holds a 31250 x 32000 strip, 1.0 billion cells, in the flat
+layout: built with `--direct`, in two groups of ranks per node, without the
+unused storage arrays (`SWE_FROMDENSE_SIGMA_DUMMY=1`). Solver defaults,
+host-staged halo overlapped with the interior, one window of 300 simulated
+seconds per point, which is 253 steps at every size.
+
+| GCDs | Nodes | Cells | Window | ms/step | Efficiency |
+|---|---|---|---|---|---|
+| 1 | | 1 B | 39.4 s | 155.73 | |
+| 8 | 1 | 8 B | 40.2 | 158.89 | 98.0 % |
+| 16 | 2 | 16 B | 40.2 | 158.89 | 98.0 % |
+| 32 | 4 | 32 B | 40.5 | 160.08 | 97.3 % |
+| 64 | 8 | 64 B | 40.3 | 159.29 | 97.8 % |
+| 128 | 16 | 128 B | 40.5 | 160.08 | 97.3 % |
+| 256 | 32 | 256 B | 40.9 | 161.66 | 96.3 % |
+| 512 | 64 | 512 B | 41.0 | 162.06 | 96.1 % |
+| 1024 | 128 | 1.024 trillion | 41.0 | 162.06 | 96.1 % |
+
+- On 1024 GCDs, 1.024 trillion cells take 253 steps in 41.0 s: 6.3 trillion
+  cell updates per second. One GCD alone updates 6.4 billion per second, the
+  rate it has at 640 M cells.
+- There is one window per point, read from the solver's log line to 0.1 s,
+  which is 0.25 % of a window; that is why some rows coincide.
+- The single-GCD time is the least certain entry. Two launches on four nodes
+  the evening before gave 156.92 and 157.31 ms/step on one GCD, and 158.89 on 8
+  and on 16 GCDs both times. Against the mean of the three single-GCD times the
+  efficiency at 1024 GCDs is 96.7 %.
+- From one node to 128 the step time grows by 2.0 %, from 158.89 to 162.06 ms;
+  the 8-GCD time was the same in all three launches. The job did not measure
+  where that time goes.
+- Device memory: of a GCD's 64 GiB the solver holds 32.6 GiB when a run ends
+  and 50.3 GiB at most (54 bytes per cell), while it sets up the band of cells
+  that wait for the halo; the mesh build peaks at 46.6 GiB.
+  `rocm-smi` shows up to 59.6 GiB for a second or so when the solver frees
+  large arrays and allocates new ones. That excess does not count against the
+  64 GiB: freeing 40 to 60 GiB and allocating as much again at once worked in
+  64 of 64 tries on one GCD.
+- The strip is 32000 cells along y because the neighbour table stores int16
+  offsets: a padded row must stay under 32768 cells. The padded strip has
+  1.0005 billion cells, under the int32 limit of the flat index.
+- On the host a rank peaks at 38 GiB while it builds its mesh; a node with eight
+  ranks, built four at a time, peaks at about 255 GiB of its 512.
+- The job took 11 minutes 24 seconds, 25 node-hours. Every GCD of the 130 nodes
+  passed the check. A point takes five to six minutes: four for the mesh build
+  on the host (two groups, two minutes each) and about one for the warm-up and
+  the timed run.
+- The dense layout also fits: one GCD ran a billion cells at 172 ms/step in a
+  60-step test, with 58 GiB of the device in use.
