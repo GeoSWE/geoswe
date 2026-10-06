@@ -16,6 +16,14 @@ authors:
     affiliation: "Georgia Institute of Technology"
 version: "1.1.1"
 date-released: "2026-10-06"
+doi: "10.5281/zenodo.23198244"          # concept DOI: always resolves to the newest version
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.23198244"
+    description: "The concept DOI of the software, which resolves to the newest version"
+  - type: doi
+    value: "10.5281/zenodo.23198245"
+    description: "The DOI of version 1.1.1"
 license: BSD-3-Clause
 repository-code: "https://github.com/GeoSWE/geoswe"
 url: "https://geoswe.readthedocs.io"

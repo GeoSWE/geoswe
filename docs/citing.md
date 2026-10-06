@@ -9,10 +9,17 @@ repository root (GitHub renders a "Cite this repository" button from it).
   title   = {{GeoSWE}: Geophysical Shallow-Water Engine},
   author  = {Chen, Peng},
   year    = {2026},  version = {1.1.1},
+  doi     = {10.5281/zenodo.23198244},
   license = {BSD-3-Clause},
   url     = {https://github.com/GeoSWE/geoswe}
 }
 ```
+
+The DOI above is the *concept* DOI: it always resolves to the newest version, which is
+what you want when citing the software in general. Every release also has its own DOI,
+and that is the one to cite for work whose results depend on it; version 1.1.1 is
+[10.5281/zenodo.23198245](https://doi.org/10.5281/zenodo.23198245), and the Zenodo page
+lists the rest.
 
 Cite the version you ran, not "the latest". Releases change what the solver computes:
 1.1.0 fixed two defects that produced plausible but wrong results in 1.0.0, so "GeoSWE"

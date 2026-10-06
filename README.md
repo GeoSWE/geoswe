@@ -14,6 +14,7 @@ from a 3 m coastal county to the conterminous United States on one multi-GPU nod
   <a href="https://github.com/GeoSWE/geoswe/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg" alt="BSD 3-Clause"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/GPU-NVIDIA%20%7C%20AMD-76b900.svg" alt="NVIDIA and AMD GPUs">
+  <a href="https://doi.org/10.5281/zenodo.23198244"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.23198244.svg" alt="DOI"></a>
 </p>
 
 *Above: 72 hours of Hurricane Helene (September 2024) simulated by the same code on three nested domains: MRMS rainfall in purple, flood depth in color, and the NOAA CO-OPS tide gauges that drive the coastal boundary as stars. [Full-resolution video (MP4)](https://github.com/GeoSWE/geoswe/blob/main/docs/images/helene_cascade.mp4).*
