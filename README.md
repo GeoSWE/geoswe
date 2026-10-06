@@ -25,8 +25,9 @@ observation-driven coastal stage boundary. Its distinguishing feature is a
 **compressed active-cell mesh**: the cells that matter (land plus a nearshore
 band) are packed into flat arrays before the run, so memory and work scale
 with the flooded landscape rather than its bounding rectangle. The same
-finite-volume kernel runs on the dense grid and on the compressed mesh, bit for
-bit. It runs on NVIDIA and AMD GPUs through [CuPy](https://cupy.dev), scales across
+finite-volume kernel runs on the dense grid and on the compressed mesh: at a fixed
+state the two give bit-identical residuals, and full runs agree to fp32 round-off at
+the wet/dry front. It runs on NVIDIA and AMD GPUs through [CuPy](https://cupy.dev), scales across
 GPUs with `mpi4py`, and falls back to NumPy on the CPU for prototyping and CI.
 
 ## Highlights
@@ -35,9 +36,9 @@ GPUs with `mpi4py`, and falls back to NumPy on the CPU for prototyping and CI.
 |---|---|
 | **Continental domains on one node** | A 72-hour Hurricane Helene scenario over CONUS at 30 m (8.88 billion active cells, 207-gauge coastal boundary) runs on eight H100 GPUs in 10.8 h; Florida at 10 m (1.78 billion active cells) on four GPUs in 9.5 h. |
 | **Fastest and leanest in a four-code benchmark** | On a 214-million-cell county case against TRITON, SynxFlow, and SERGHEI, GeoSWE's active-cell configuration has the lowest wall time and GPU memory at every GPU count: 3.5 to 3.9 times faster and 1.5 to 1.9 times leaner than the nearest peer, with pairwise CSI near 0.99. |
-| **Compression without a numerical penalty** | Dense and compressed runs take identical step counts and agree to 0.05 cm RMSE (CSI 1.000) on the same cells. |
+| **Compression costs no steps and little depth** | On the standing-tide case, dense and compressed runs take identical step counts (16,051). With every cell active, which isolates the storage layout, depths agree to 0.05 cm RMSE (CSI 1.000); with the terrain-selected active set, the configuration whose speedup is quoted above, to 1.36 cm (0.02 cm on the rain-driven variant). |
 | **Near-ideal scaling** | 99.5 % weak-scaling efficiency at 16 H100 GPUs (10.24 billion cells) and 98.8 % at 32 Blackwell MIG slices across two nodes (20.48 billion cells). |
-| **Thin-film accuracy** | On a steady rained slope with a high-accuracy reference solution, GeoSWE stays within 1 % of the reference film depth where other codes depart by tens of percent. |
+| **Thin-film accuracy** | On a steady rained slope with a high-accuracy reference solution, GeoSWE stays within 1 % of the reference film depth, where TRITON and SERGHEI depart by tens of percent. SynxFlow matches it to about 1 %, which is the point: it shares the surface-reconstruction bed treatment. |
 
 The application runs are computational demonstrations under stated, uncalibrated settings, not validated flood hindcasts.
 
@@ -47,7 +48,7 @@ The application runs are computational demonstrations under stated, uncalibrated
 
 *(a) Per-step wall time against peak GPU memory per rank for each code's fastest configuration on the 3 m Pinellas County benchmark (1, 2, and 4 GPUs; large marker = 4 GPUs). (b) Depth error against the steady shallow-water reference on a uniformly rained slope.*
 
-Comparison codes as benchmarked: TRITON (commit `ec35bc4`), SERGHEI (commit `39a10f2`), and SynxFlow 1.0.2; all four in fp32 at CFL 0.5, first-order well-balanced schemes, same H100 node, identical inputs. Builds, decks, and patches are in the paper's reproducibility appendix.
+Comparison codes as benchmarked: TRITON (commit `ec35bc4`), SERGHEI (commit `39a10f2`), and SynxFlow 1.0.2; all four in fp32 at CFL 0.5, first-order well-balanced schemes, same H100 node, identical inputs. The wet/dry floor is the one setting not held common: GeoSWE runs at 1e-6 m, SERGHEI's `dryDepth` was raised from 1 mm to 5 mm to stop a time-step collapse, and TRITON ran at its best-matched `hextra = 1e-2`. Builds, decks, and patches are in the paper's reproducibility appendix.
 
 ## How it scales
 

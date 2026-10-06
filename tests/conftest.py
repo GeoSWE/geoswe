@@ -31,8 +31,11 @@ from pathlib import Path
 # it importable without an editable install. Must precede any `import geoswe`.
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-# Must be set before `geoswe` (hence `geoswe.backend`) is first imported.
-os.environ.setdefault("GEOSWE_BACKEND", "numpy")
+# Must be set before `geoswe` (hence `geoswe.backend`) is first imported. Assignment, not
+# setdefault: 18 of these tests assert NumPy semantics on purpose, so an exported
+# GEOSWE_BACKEND=cupy (which docs/examples.md tells GPU users to set) would fail them, and
+# with no visible device the suite would not even collect.
+os.environ["GEOSWE_BACKEND"] = "numpy"
 
 
 # The probe below allocates this much: small enough for any real device, large

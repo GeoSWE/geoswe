@@ -94,7 +94,9 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except ImportError:
-    raise SystemExit("matplotlib not available -- numbers printed above")
+    # the numbers above are the result; the plot is optional, so exit 0 like the other examples
+    print("(matplotlib not installed; skipping plot) -- `pip install \"geoswe[examples]\"` to draw it")
+    raise SystemExit(0)
 
 plt.rcParams.update({"font.size": 13})
 fig, ax = plt.subplots(figsize=(8.2, 6.0))

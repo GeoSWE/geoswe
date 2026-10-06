@@ -295,9 +295,9 @@ def download_noaa_tide_csv(station_id: str, begin_iso: str, end_iso: str,
     station_id: e.g. "8726520" (St. Petersburg, FL).
     Returns the local CSV path.
     """
-    import requests
     import urllib.parse
-    import pandas as pd
+    import urllib.request
+    pd = _pandas("download_noaa_tide_csv")
     base = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
     # Build conforming CO-OPS date strings ("yyyyMMdd HH:mm") via strftime;
     # naive string surgery can produce e.g. "20240925 000" (a truncated
@@ -314,16 +314,17 @@ def download_noaa_tide_csv(station_id: str, begin_iso: str, end_iso: str,
         "application": "geoswe",
     }
     url = base + "?" + urllib.parse.urlencode(params)
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
+    # urllib keeps this the only HTTP call in the package and adds no dependency.
+    with urllib.request.urlopen(url, timeout=60) as resp:          # raises HTTPError on 4xx/5xx
+        text = resp.read().decode("utf-8", errors="replace")
     # CO-OPS reports failures as a 200 with an "Error" body; detect it
     # here instead of writing a CSV that later parses to NaN stages.
-    first_line = r.text.lstrip().splitlines()[0] if r.text.strip() else ""
+    first_line = text.lstrip().splitlines()[0] if text.strip() else ""
     if first_line.startswith("Error"):
         raise RuntimeError(
             f"NOAA CO-OPS API returned an error for station {station_id}: "
-            f"{r.text.strip()[:300]}")
+            f"{text.strip()[:300]}")
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w") as f:
-        f.write(r.text)
+        f.write(text)
     return out_path

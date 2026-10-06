@@ -18,7 +18,7 @@ imports them.
 | `sheetflow_plane/` | Sect. 5.5: steady rain-driven sheet flow on a plane, scored against the exact steady solution of the shallow-water equations | 1,760 cells at 3 m (and 4,960 at 1 m) | one GPU, seconds per run |
 | `pinellas_3m/` | Sect. 5.2–5.4: the cross-code comparison against ORNL TRITON, SERGHEI and SynxFlow on audited-identical inputs: a standing-tide case and a rain-driven ×10 stress test | 214.4 M cells at 3 m; 125.6 M active | 1–4 × NVIDIA H100 80 GB, one node |
 | `scaling_640m/` | Sect. 4.6: synthetic weak/strong scaling of the dense and flat layouts on an everywhere-wet domain | 640 M cells per rank | 1–16 H100, and 1–32 Blackwell MIG slices |
-| `frontier_amd/` | not a paper case: the environment, job script and results of running GeoSWE on AMD GPUs at OLCF Frontier (GPU test suite, partition-invariance check, the `scaling_640m` harness) | 147 M and 640 M cells per rank | 1–16 MI250X GCDs, up to two nodes |
+| `frontier_amd/` | not a paper case: the environment, job scripts and results of running GeoSWE on AMD GPUs at OLCF Frontier (GPU test suite, partition-invariance check, the `scaling_640m` harness, and `run_weak_1b.sbatch` at one billion cells per GCD) | 147 M, 640 M and 1 B cells per rank | 1–1024 MI250X GCDs, 1–128 nodes (1.024 trillion cells) |
 | `common/` | shared path resolution and GPU checks used by all cases | n/a | n/a |
 
 **Start with `sheetflow_plane/`.** It is the smallest complete result in the

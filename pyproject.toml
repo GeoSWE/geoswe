@@ -29,9 +29,11 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Hydrology",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
 ]
 
 # NumPy is the only hard runtime dependency: the dense solver runs on the
@@ -58,13 +60,15 @@ docs = [
     "sphinx-design",
 ]
 test = ["pytest>=7"]
-all = ["geoswe[gpu,mpi,io,forcings]"]
+examples = ["matplotlib>=3.7"]               # the plots the examples and benchmark scripts draw
+all = ["geoswe[gpu,mpi,io,forcings,examples]"]
 
 [project.urls]
 Homepage = "https://github.com/GeoSWE/geoswe"
 Documentation = "https://geoswe.github.io/geoswe"
 Repository = "https://github.com/GeoSWE/geoswe"
 Issues = "https://github.com/GeoSWE/geoswe/issues"
+Changelog = "https://github.com/GeoSWE/geoswe/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

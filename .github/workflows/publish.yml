@@ -13,16 +13,46 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - run: pytest -m "not gpu" -o addopts="" -q
+        env:
+          GEOSWE_BACKEND: numpy
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # A tag build must publish the version it claims. Keyed on ref_type, because the
+      # documented route is workflow_dispatch from a tag, where event_name is not "release".
+      - name: The tag must match the package version
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          test "$tag" = "$ver" || { echo "tag $GITHUB_REF_NAME != version $ver"; exit 1; }
       - run: python -m pip install build twine
       - run: python -m build
       - run: twine check --strict dist/*
+      - name: The sdist must not carry the docs media again
+        run: |
+          size=$(stat -c%s dist/*.tar.gz)
+          echo "sdist $size bytes"
+          test "$size" -lt 3000000 || { echo "sdist over 3 MB: check MANIFEST.in"; exit 1; }
+      - name: The wheel must import in a clean environment
+        run: |
+          python -m venv /tmp/v && /tmp/v/bin/pip install -q dist/*.whl
+          /tmp/v/bin/python -c "import geoswe, geoswe.runlib; print(geoswe.__version__)"
       - uses: actions/upload-artifact@v4
         with:
           name: dist

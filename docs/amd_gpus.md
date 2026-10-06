@@ -162,4 +162,6 @@ numbers, not as a controlled comparison.
   on AMD hardware.
 - The register cap that speeds up the residual kernel on H100 has no ROCm
   counterpart, and no AMD-specific tuning of block sizes has been tried.
-- Two nodes (16 devices) are the most that has been used.
+- The `scaling_640m` harness has been run on up to two nodes (16 devices); the weak-scaling
+  campaign at one billion cells per GCD (`run_weak_1b.sbatch`) reaches 128 nodes, 1024
+  devices and 1.024 trillion cells.

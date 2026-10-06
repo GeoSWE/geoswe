@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ["3.10", "3.12"]
+        python: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e . matplotlib
+      - run: pip install -e ".[examples]"   # the declared extra, so CI exercises what users install
       - run: |
           for ex in ex01_dam_break_1d ex02_circular_dam_break_2d ex03_lake_at_rest_2d ex04_rain_on_slope_2d ex07_convergence_order; do
             python examples/$ex.py

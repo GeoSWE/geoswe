@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e . -r docs/requirements.txt
+      - run: pip install -e ".[docs]"
       - run: python -m sphinx -b html -W --keep-going docs docs/_build
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -2,10 +2,16 @@ include LICENSE
 include README.md
 include CITATION.cff
 include environment.yml
+include CHANGELOG.md
 recursive-include src/geoswe *.py
-graft examples
+# explicit patterns, not grafts: a graft copies the working tree, including the gitignored
+# run output the examples leave behind (PNG, TIF) and the README's 7.9 MB GIF and MP4, which
+# are served from GitHub and referenced by nothing in the package.
+recursive-include examples *.py *.md
+include examples/data/*.npz
 graft tests
-graft docs
+recursive-include docs *.md *.rst *.py *.txt
+prune docs/images
 prune docs/_build
 # internal review notes and release planning stay in the repo, not the sdist
 prune docs/dev

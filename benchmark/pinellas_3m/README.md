@@ -125,5 +125,5 @@ The rain-driven stress test of Sect. 5.4 reuses the same bed/Manning arrays:
 
 ```bash
 python milton_build_case_milton_3m.py   # x10 rainfall case, open outline, 500 m ring
-python gen_milton_3code_compare.py      # Fig. 12 max-inundation panels (all four codes)
+python gen_milton_3code_compare.py      # Fig. 12 max-inundation panels (GeoSWE, TRITON, SynxFlow)
 ```
