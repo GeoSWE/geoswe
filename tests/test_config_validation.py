@@ -14,7 +14,7 @@ VALID = {
     "flux": ["lf", "hllc"],
     "recon": ["first", "muscl", "linear2", "linear3", "linear5", "weno5"],
     "wb_method": ["audusse", "srm"],
-    "pde": ["igr", "baseline"],
+    "pde": ["baseline"],          # "igr" is gated: see test_igr_is_gated below
     "sigma_bc": ["neumann", "periodic"],
     "dtype": ["float32", "float64"],
     "rk_storage": ["low_storage", "high_storage"],
@@ -58,3 +58,16 @@ def test_solver2d_with_typo_config_raises():
         cfg = Config(flux="roe")  # invalid -> raises here
         q0 = np.zeros((3, 8, 8)); q0[0] = 1.0
         Solver2D(mesh, cfg, q0, np.zeros((8, 8)))
+
+
+def test_igr_is_gated_out_of_the_supported_api(monkeypatch):
+    """pde='igr' is research code: rejected by default, available behind an explicit opt-in."""
+    import pytest
+    from geoswe import Config
+
+    monkeypatch.delenv("GEOSWE_ENABLE_IGR", raising=False)
+    with pytest.raises(ValueError, match="experimental"):
+        Config(pde="igr")
+
+    monkeypatch.setenv("GEOSWE_ENABLE_IGR", "1")
+    assert Config(pde="igr").pde == "igr"        # still reachable for research use

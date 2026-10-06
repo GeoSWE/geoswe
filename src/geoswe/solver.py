@@ -5,8 +5,10 @@ floors, friction, boundaries, forcing). Two PDE modes are available:
 
     'baseline': the standard nonlinear SWE; the production mode behind every
                  reported result (first-order SRM-HLLC, point-implicit Manning).
-    'igr': optional Information-Geometric Regularization (Cao-Schäfer 2023),
-                 which adds the entropic-pressure Σ solved by ``elliptic.py``.
+    'igr': experimental Information-Geometric Regularization (Cao-Schäfer 2023),
+                 which adds the entropic-pressure Σ solved by ``elliptic.py``. Untested
+                 and outside the 1.x API promise: Config rejects it unless
+                 GEOSWE_ENABLE_IGR=1.
 
 Two reconstruction choices and two Riemann-solver choices that can be combined freely.
 """
@@ -735,6 +737,15 @@ class Config:
             import warnings
             warnings.warn("Config: a Manning roughness is set but friction is off, so the run is "
                           "frictionless; pass friction='manning' to apply it", stacklevel=3)
+        # The IGR entropic-pressure model is research code: it has no test coverage, its Sigma
+        # kernels differ between the CPU and GPU paths, and alpha=0 (the default) makes it
+        # silently identical to 'baseline'. It is therefore not part of the 1.x API promise.
+        if self.pde == "igr" and os.environ.get("GEOSWE_ENABLE_IGR", "0") != "1":
+            raise ValueError(
+                "Config.pde='igr' (Information-Geometric Regularization) is experimental and "
+                "outside the supported API: it is untested, and with the default alpha=0 it is "
+                "silently identical to pde='baseline'. Use pde='baseline', or set "
+                "GEOSWE_ENABLE_IGR=1 to run it unsupported.")
 
 
 # ---------------------------------------------------------------------------

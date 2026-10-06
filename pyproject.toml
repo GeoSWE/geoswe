@@ -59,7 +59,7 @@ docs = [
     "sphinx-copybutton",
     "sphinx-design",
 ]
-test = ["pytest>=7"]
+test = ["pytest>=7", "scipy>=1.10"]            # scipy: data_prep (clean_dem) and the case conditioner
 examples = ["matplotlib>=3.7"]               # the plots the examples and benchmark scripts draw
 all = ["geoswe[gpu,mpi,io,forcings,examples]"]
 

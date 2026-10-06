@@ -35,6 +35,14 @@ First public release.
   read outside the array and wrote the running maximum into the ghost ring.
 - Ranks agree on the dt scheme of the compressed step loop. The choice was made from
   rank-local forcing flags, so ranks could issue different collectives on one communicator.
+- `clean_dem` no longer clips elevations by default. It clipped to (-15, 50) m, a range taken
+  from one coastal county, so terrain above 50 m came back flattened and the run that followed
+  was quietly wrong. Pass `clip_range` to ask for it.
+- `linear5` reconstruction builds its weights in the state's dtype. Under NumPy 2 and CuPy its
+  float64 weights promoted a float32 state to float64, doubling the memory of that one scheme.
+- `Config(pde="igr")` is rejected unless `GEOSWE_ENABLE_IGR=1`. The entropic-pressure model is
+  research code with no test coverage, and at the default `alpha=0` it was silently identical
+  to `pde="baseline"`.
 
 ## Compatibility promise for 1.x
 
@@ -48,4 +56,5 @@ Within the 1.x series, these are stable and will not break without a major-versi
 
 Not covered, and free to change in a minor release: the `SWE_*` and `GEOSWE_*` performance,
 benchmark and debugging switches documented in `docs/configuration.md`, anything whose name
-begins with an underscore, and the contents of `benchmark/`.
+begins with an underscore, the contents of `benchmark/`, and the experimental IGR model behind
+`GEOSWE_ENABLE_IGR` (`Config.pde`, `Config.alpha`, `Config.sigma_*` and the `elliptic` modules).

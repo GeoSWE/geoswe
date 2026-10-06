@@ -113,8 +113,11 @@ def _reconstruct_axis(q, axis: int, scheme: str):
         #   wR = (-3, 27, 47, -13, 2)/60
         # qL_{i+1/2} uses cells i-2..i+2
         # qR_{i+1/2} uses cells i-1..i+3
-        wL = np.array([2.0, -13.0, 47.0, 27.0, -3.0]) / 60.0
-        wR = np.array([-3.0, 27.0, 47.0, -13.0, 2.0]) / 60.0
+        # In the state's dtype: float64 weights promote a float32 state to float64 under NEP 50
+        # (NumPy 2 and CuPy), which doubles the memory of the one scheme that does it and leaves
+        # linear5 returning a different dtype from every other scheme.
+        wL = np.array([2.0, -13.0, 47.0, 27.0, -3.0], dtype=q.dtype) / q.dtype.type(60.0)
+        wR = np.array([-3.0, 27.0, 47.0, -13.0, 2.0], dtype=q.dtype) / q.dtype.type(60.0)
 
         n = q.shape[axis]
         if n < 6:   # linear5 needs ngh>=3 (6 cells along axis); fail loud, not empty

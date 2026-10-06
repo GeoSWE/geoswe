@@ -53,7 +53,7 @@ def merge_dems_to_grid(
     target_dx: float,
     target_crs: str = "EPSG:26917",     # UTM Z17N (Pinellas)
     nodata_fill: float = -9999.0,
-    clip_range: Tuple[float, float] = (-15.0, 50.0),
+    clip_range: Optional[Tuple[float, float]] = None,
 ) -> Tuple[np.ndarray, dict]:
     """Merge USGS 3DEP topo and NOAA CUDEM bathy on a target UTM grid.
 
@@ -176,7 +176,7 @@ def clean_dem(bed: np.ndarray,
               nodata: float = -9999.0,
               denormal_thr: float = 1e-3,
               abrupt_jump_m: float = 8.0,
-              clip_range: Tuple[float, float] = (-15.0, 50.0),
+              clip_range: Optional[Tuple[float, float]] = None,
               passes: int = 3) -> np.ndarray:
     """Postprocess a merged DEM in (rows, cols) orientation.
 
@@ -184,7 +184,11 @@ def clean_dem(bed: np.ndarray,
       1. Float32 denormals / near-zero values from reproject edges.
       2. Single-pixel outliers that differ from their 8-neighbour median by
          more than ``abrupt_jump_m`` (tile-boundary cliffs from CUDEM).
-      3. Out-of-range elevations (clipped to ``clip_range``).
+      3. Out-of-range elevations, when ``clip_range`` is given: a ``(low, high)``
+         pair in metres, clipped to those bounds. It defaults to None, which
+         clips nothing. Give it only when you know the elevation range of your
+         own terrain: a bound below the ground flattens the landscape silently,
+         and the run then succeeds on a wrong DEM.
 
     Invalid cells are then infilled by nearest-neighbour from valid cells via
     a distance transform. Pass count controls how many outlier-detect/infill
@@ -210,8 +214,11 @@ def clean_dem(bed: np.ndarray,
             break
         arr[outliers] = med[outliers]
 
-    # 3. Hard clip: anything outside physical range becomes the boundary
-    arr = np.clip(arr, clip_range[0], clip_range[1])
+    # 3. Optional hard clip: anything outside the caller's range becomes the boundary.
+    # No default range: this function has no way to know the terrain's elevations, and a
+    # wrong bound truncates the DEM without any sign in the run that followed.
+    if clip_range is not None:
+        arr = np.clip(arr, clip_range[0], clip_range[1])
 
     return arr.astype(bed.dtype)
 
