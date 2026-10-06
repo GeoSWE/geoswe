@@ -51,6 +51,25 @@ intersphinx_mapping = {
     "numpy": ("https://numpy.org/doc/stable", None),
 }
 
+# Unresolved Python cross-references are silent by default, which is how every
+# `{py:class}`/`{py:meth}` reference in this tree came to render as plain monospace
+# instead of a link. nitpicky makes each one a warning and -W makes it a failure.
+# Keep the list below to targets that cannot resolve, and say why: an entry added to
+# quiet a build hides the next real broken link.
+nitpicky = True
+nitpick_ignore = [
+    # solver.py:1623 reads `mask : ndarray of bool, or None to clear.`, so napoleon
+    # takes the whole description as the type and hands the Python domain two targets
+    # that no object has. Writing that one line as `ndarray of bool or None`, with
+    # "None clears the mask" in the description below it, retires both entries.
+    ("py:class", "ndarray"),
+    ("py:class", "None to clear."),
+    # `np.ndarray` in the Solver1D/Solver2D constructor annotations: solver.py imports
+    # the backend array module as `np`, so the annotation is rendered as written and
+    # there is no object of that name to point at. numpy's own `numpy.ndarray` resolves.
+    ("py:class", "np.ndarray"),
+]
+
 source_suffix = {".md": "markdown", ".rst": "restructuredtext"}
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "dev"]   # docs/dev is internal
@@ -68,10 +87,15 @@ html_baseurl = "https://geoswe.readthedocs.io/en/latest/"
 # api/solver.rst) until that option is documented. Delete this block to show them.
 _HIDDEN_CONFIG_FIELDS = {"alpha", "sigma_max_iter", "sigma_tol", "sigma_bc",
                          "sigma_h_min", "sigma_stages", "sigma_halo_every"}
+# Both names Config can be documented under: the re-exported `geoswe.Config`, which
+# api/solver.rst uses, and the defining `geoswe.solver.Config`. The hook is keyed on
+# the name autodoc reports, so a page that moves the class between the two silently
+# publishes the hidden fields unless both are listed here.
+_CONFIG_NAMES = {"geoswe.Config", "geoswe.solver.Config"}
 
 
 def _hide_config_fields(app, what, name, obj, options, signature, return_annotation):
-    if name != "geoswe.solver.Config":
+    if name not in _CONFIG_NAMES:
         return None
     import inspect
     stores = []

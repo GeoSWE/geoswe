@@ -1,7 +1,11 @@
 Solvers and configuration
 ==========================
 
-.. currentmodule:: geoswe.solver
+.. currentmodule:: geoswe
+
+The three classes a run is built from. All three are defined in
+``geoswe.solver`` and re-exported at the top level, which is the form this page
+documents them in.
 
 .. autoclass:: Config
    :members:

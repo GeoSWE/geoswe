@@ -1,12 +1,13 @@
 # Installation
 
 GeoSWE needs only **NumPy** to run on the CPU. GPU acceleration, multi-GPU runs,
-and GeoTIFF I/O are opt-in extras.
+and GeoTIFF I/O are opt-in extras. Python 3.10 or newer is required; the test
+suite runs on 3.10, 3.12 and 3.13, on Linux and on macOS.
 
 ## pip
 
 ```bash
-# CPU only (NumPy backend): enough for the examples, tests, and docs
+# CPU only (NumPy backend): the solver and the examples
 pip install geoswe
 
 # NVIDIA GPU (CUDA 12 or CUDA 13 drivers)
@@ -15,8 +16,8 @@ pip install "geoswe[gpu]"
 # AMD GPU (ROCm 7.x)
 pip install "geoswe[gpu-rocm]"
 
-# everything: GPU + MPI + GeoTIFF I/O + CSV forcings
-pip install "geoswe[gpu,mpi,io,forcings]"
+# everything a run needs: GPU + MPI + GeoTIFF I/O + CSV forcings + the examples' plots
+pip install "geoswe[all]"
 ```
 
 ```{note}
@@ -44,8 +45,13 @@ pip install -e ".[all]"
 | `mpi` | `mpi4py` | multi-GPU / distributed runs (halo exchange) |
 | `io` | `rasterio`, `pyproj` | reading DEMs and writing flood GeoTIFFs |
 | `forcings` | `pandas`, `scipy` | CSV rainfall/tide ingestion, case conditioning, the high-level runner |
+| `examples` | `matplotlib` | the plots the examples and the benchmark scripts draw |
 | `docs` | `sphinx`, `myst-parser`, … | building this documentation |
-| `test` | `pytest` | running the test suite |
+| `test` | `pytest`, `scipy` | running the test suite |
+
+`all` is `gpu`, `mpi`, `io`, `forcings` and `examples` together; `docs` and `test`
+are not part of it. Without `examples` the examples still run and print their
+numbers, and say that they are skipping their plot.
 
 ```{note}
 Install **one** CuPy build per environment. The `gpu` extra ships the CUDA
@@ -116,6 +122,12 @@ imported; calling it later raises a `RuntimeError` pointing you back to
 python -c "import geoswe; print(geoswe.__version__, geoswe.get_backend())"
 pip install ".[test]" && pytest             # from a source checkout; GPU tests skip unless a GPU is free
 ```
+
+Some tests skip without an optional tool, and `pytest -rs` lists each skip with its
+reason. `pip install ".[test,io,forcings]"` adds the GeoTIFF and CSV ingestion
+tests, and the check that compiles every CUDA kernel source runs only where `nvcc`
+is on `PATH` or under `CUDA_PATH` or `CUDA_HOME` (it needs the compiler, not a
+device).
 
 ```{tip}
 `Failed to find CUDA headers` means CuPy can run on the device but cannot compile

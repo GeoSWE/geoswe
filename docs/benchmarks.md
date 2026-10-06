@@ -22,10 +22,17 @@ sixteen-slice nodes, which reaches twice the cell count.
   (96.8% efficiency) and **26.5×** at 32 Blackwell slices across two nodes
   (82.9%), tapering once each rank holds too few cells (the surface-to-volume
   trade-off).
-- The **flat-full** configuration is 9 % faster per step than the **dense** one at
-  constant per-rank work, while producing bit-identical residuals on the same cells.
-  (These scaling runs keep every cell active, so they measure the layout, not the
-  active mask; see [the three configurations](compressed_mesh.md#three-configurations).)
+- The **flat-full** configuration is faster per step than the **dense** one at constant
+  per-rank work, while producing bit-identical residuals on the same cells. The margin
+  depends on the machine, so take the number with its machine: **9 %** on the hardware of
+  this study, one H100 MIG slice at 640 M cells per rank (115.1 against 127.7 ms/step).
+  The same two harnesses on one full L40S at 320 M cells per rank give 22.6 against
+  28.4 ms/step, a 26 % margin, and under the first campaign's split-forcings flags
+  (`SWE_FUSE_FORCINGS=0`, `CFL_RESAMPLE_EVERY=5`) 37.7 against 66.0 ms/step, a factor 1.75.
+  Both tiers are bandwidth-bound at these sizes, and the dense tier is the one that moves:
+  it is more sensitive to the card and to which forcings are fused.
+  (These runs keep every cell active, so they measure the layout, not the active mask; see
+  [the three configurations](compressed_mesh.md#three-configurations).)
 
 Do not difference the two hardware configurations against each other for a
 per-device ratio: they are separate machines with different interconnects and

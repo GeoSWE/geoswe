@@ -50,6 +50,7 @@ installation
 quickstart
 flood_tutorial
 examples
+troubleshooting
 ```
 
 ```{toctree}
@@ -69,9 +70,11 @@ userguide/well_balanced
 :caption: Scaling up
 
 compressed_mesh
+cache_replay
+checkpointing
 multigpu_mpi
 amd_gpus
-configuration
+performance
 benchmarks
 ```
 
@@ -80,5 +83,6 @@ benchmarks
 :caption: Reference
 
 api/index
+configuration
 citing
 ```

@@ -17,7 +17,17 @@ cfg = Config(friction="manning", manning_n=0.03, rainfall_forcing=rain)
 ```
 
 Each rate holds from its time until the next one, and the last rate holds from
-then on (the rate is piecewise constant, not interpolated). Two more forms:
+then on (the rate is piecewise constant, not interpolated). `time_s` must be
+non-decreasing and must carry exactly one rate per time; both are checked when
+the forcing is constructed, because the lookup is a bisection and a time out of
+order would quietly return another segment's rate. Equal times are allowed,
+since repeated timestamps are common in gauge records.
+
+```text
+ValueError: RainfallForcing: time_s must be non-decreasing, but time_s[2]=1800 < time_s[1]=3600 (1 step back in time). The lookup is a bisect, so an out-of-order time returns another segment's value instead of raising; reorder times and values together, o = np.argsort(time_s, kind='stable'). Equal times are fine.
+```
+
+Two more forms:
 
 ```python
 import numpy as np
@@ -39,11 +49,11 @@ adds no momentum. Water that falls is tracked until it leaves through an open
 boundary (`bc="fall"`) or a depth sink.
 
 ```{note}
-On a dry bed the CFL condition does not limit the time step, because there is no
-wave speed yet. {py:meth}`~geoswe.Solver2D.run` therefore keeps the step below
-the CFL step of the film that the rain lays down during the step,
-$(\mathrm{CFL}\,\Delta x)^{2/3}/(gR)^{1/3}$. If you step by hand with
-`step(cfl_dt())`, cap the first steps yourself.
+On a dry bed no wave speed limits the time step, so {py:meth}`~geoswe.Solver2D.run`
+also caps it at the CFL step of the film the rain lays down,
+$(\mathrm{CFL}\,\Delta x)^{2/3}/(gR)^{1/3}$. A hand-written `step(cfl_dt())` loop
+and `run` on more than one rank do not get that cap (see
+[numerical methods](numerical_methods.md)), so cap the first steps yourself there.
 ```
 
 ## Coastal stage (tides, surge, river stage)
@@ -66,15 +76,20 @@ cfg = Config(friction="manning", manning_n=0.03, stage_boundary=tide)
 After every step the marked cells are set to $h = \max(0, \eta(t) - b)$ with
 zero momentum, while the rest of the grid responds freely; $\eta(t)$ is
 interpolated linearly between the given times and held at the end values
-outside them. This zero-momentum condition prescribes a water level; it does
-not represent wave setup or nearshore currents.
+outside them. The times must be non-decreasing here too, and for the same
+reason. This zero-momentum condition prescribes a water level; it does not
+represent wave setup or nearshore currents.
 
 `StageBoundary.from_noaa_csv(csv_path, t0_iso, cells, bed_b)` reads the time
-series from a NOAA CO-OPS water-level file (needs pandas), and
-`geoswe.forcing.download_noaa_tide_csv` fetches one. The plain constructor takes
-`cells` as indices on the solver's padded grid (the unpadded index plus
-`mesh.ngh`); `from_mask` does that conversion for you. `Config.stage_boundary`
-also accepts a list of boundaries, one per stretch of coast.
+series from a NOAA CO-OPS water-level file, and
+`geoswe.forcing.download_noaa_tide_csv` fetches one (both need pandas, from the
+`forcings` extra). A file whose rows are out of time order is sorted rather than
+refused, with a warning: sorting restores the order, but a download that
+scrambled the rows is usually missing some of them too, and that it cannot fix.
+The plain constructor takes `cells` as indices on the solver's padded grid (the
+unpadded index plus `mesh.ngh`); `from_mask` does that conversion for you.
+`Config.stage_boundary` also accepts a list of boundaries, one per stretch of
+coast.
 
 ```{tip}
 Combine an open seaward edge (`bc_x="fall"` or `"extrapolate"`) with a
@@ -87,11 +102,11 @@ the imposed-stage cells while the open edge lets it leave.
 The application runs of the paper add, through the
 [compressed solver](../compressed_mesh.md)'s setters:
 
-- `set_ring`: the **coastal ring**, a band of coastline cells whose stage $\eta(t)$ is the inverse-distance-weighted ($1/d^2$, $K=4$ nearest) interpolation of NOAA CO-OPS gauge records; $h = \max(0, \eta - b)$ with momentum zeroed, imposed last in the step.
+- `set_ring`: the **coastal ring**, a band of coastline cells whose stage $\eta(t)$ is the $1/d^2$ inverse-distance-weighted interpolation of every NOAA CO-OPS gauge of the case (four in the paper's Pinellas runs); $h = \max(0, \eta - b)$ with momentum zeroed, imposed after the sponge and before the depth sinks.
 - `set_sponge`: an **open-boundary sponge** on the outer rectangle edges that relaxes the state toward an ambient still water, with a weight ramping quadratically to the domain edge.
 - `set_rain`: a `RainfallForcing`, or a gridded rainfall table on its native grid (MRMS frames, held piecewise constant between frames).
 - `set_ga_drain`: **Green-Ampt infiltration**, integrated implicitly with a per-cell capacity cap.
-- `set_infil`: a **uniform recession sink**, a constant depth removed per step from land cells.
+- `set_infil`: a **uniform recession sink**, a constant rate taken from land cells and nothing from open water.
 - `set_drain`: a **karst cap** that limits the depth in flagged closed basins.
 
 Except for `set_rain`, these take the bundles that the case runner

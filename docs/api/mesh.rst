@@ -1,7 +1,7 @@
 Meshes and backend
 ==================
 
-.. currentmodule:: geoswe.mesh
+.. currentmodule:: geoswe
 
 .. autoclass:: Mesh2D
    :members:
@@ -12,7 +12,10 @@ Meshes and backend
 Backend control
 ---------------
 
-.. currentmodule:: geoswe.backend
+These live in ``geoswe.backend`` and are re-exported at the top level, which is
+how every page and example calls them: ``geoswe.get_backend()``.
+``geoswe.set_backend`` only takes effect before any solver module has been
+imported; see :doc:`../installation`.
 
 .. autofunction:: set_backend
 .. autofunction:: get_backend

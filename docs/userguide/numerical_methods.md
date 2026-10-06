@@ -25,7 +25,7 @@ accuracy for cost and robustness:
 | `"first"` | 1st | most robust; pairs with the well-balanced source for a consistent 1st-order scheme |
 | `"muscl"` | 2nd | MUSCL with slope limiting |
 | `"linear2"`, `"linear3"` | 2nd/3rd | linear reconstructions |
-| `"linear5"` | 5th | high-order linear (needs `ngh>=3`) |
+| `"linear5"` | 5th | high-order linear (needs `ngh>=3` in 2D, `ngh>=4` in 1D) |
 | `"weno5"` | 5th | WENO, shock-capturing |
 
 ```{warning}
@@ -34,7 +34,27 @@ accuracy for cost and robustness:
 itself, and they are first order by construction, so `muscl` and `weno5` give
 the same answer to the last bit as `first`. A reconstruction study therefore
 sets `well_balanced=False`, as {file}`examples/ex07_convergence_order.py` does;
-a `Config` that asks for both now says so.
+a `Config` that asks for both warns at construction.
+```
+
+```{note}
+`Mesh2D.ngh` and `Mesh1D.ngh` default to 4, which covers every scheme. Below that, both
+solvers check the halo at construction against what will actually run, not against the
+reconstruction radius alone, and refuse one that is too narrow with the width it needs.
+Three bounds feed that check:
+
+- the reconstruction stencil, 1 for `first`, `muscl`, `linear2` and `linear3` and 3 for
+  `linear5` and `weno5`, which is all the NumPy path reads;
+- on the GPU, the guard inside the fused kernel the configuration dispatches to, which
+  skips every cell outside its own halo. The SRM well-balanced kernels (the default, with
+  either flux) need 2, the non-well-balanced Lax-Friedrichs family needs 3 with every
+  reconstruction, `"first"` included, and first-order HLLC without the well-balanced
+  source needs 1. A halo one layer too narrow used to run and leave the outermost
+  interior rows and columns frozen, with water never leaving a `"fall"` boundary;
+- in 1D, the window the residual is written into, which is asymmetric and wider than the
+  stencil: `well_balanced=True` needs 1 whatever `recon` says, and with
+  `well_balanced=False` `muscl`, `linear2` and `linear3` need 2 while `linear5` and
+  `weno5` need 4.
 ```
 
 ```{tip}
@@ -65,7 +85,7 @@ s.step(dt=min(s.cfl_dt(), dt_max))
 ```
 
 ```{note}
-On a **fully dry** domain no wave speed limits the step: the wave speed falls back to $\sqrt{g h_\min}$ and `cfl_dt()` returns minutes to hours. While it rains, `run` therefore also keeps the step below the CFL step of the film that the rain lays down during the step, $(\mathrm{CFL}\,\Delta x)^{2/3}/(g R)^{1/3}$ for a rain rate $R$. On wet ground this bound is far above the CFL step and changes nothing. A hand-written `step(cfl_dt())` loop has no such bound, so cap its first steps.
+On a **fully dry** domain no wave speed limits the step: the wave speed falls back to $\sqrt{g h_\min}$ and `cfl_dt()` returns minutes to hours. While it rains, `run` therefore also keeps the step below the CFL step of the film that the rain lays down during the step, $(\mathrm{CFL}\,\Delta x)^{2/3}/(g R)^{1/3}$ for a rain rate $R$. On wet ground this bound is far above the CFL step and changes nothing. Two loops do not get it: a hand-written `step(cfl_dt())` loop, and `run` on more than one rank, where the ranks see different rain and must keep a common step. Cap the first steps yourself there.
 ```
 
 ## Operator splitting
@@ -84,4 +104,4 @@ Friction is unconditionally stable in its point-implicit form, and the sinks are
 
 ## Robustness on real terrain
 
-Production DEMs are noisy and create extreme states at pits, curbs, bridge decks, and bathymetry seams. GeoSWE guards against them with the dry-state limits of the wet/dry floor, the dry-bed wave speeds in the HLLC solver, the $\sqrt{g h_\min}$ fallback in the CFL reduction, and the velocity cap in the friction step (`friction_velocity_cap_ms`, 15 m/s in every reported run; it activates sparsely). These are what let the same solver run a clean dam break and a continental DEM without retuning.
+Production DEMs are noisy and create extreme states at pits, curbs, bridge decks, and bathymetry seams. GeoSWE guards against them with the dry-state limits of the wet/dry floor, the dry-bed wave speeds in the HLLC solver, the $\sqrt{g h_\min}$ fallback in the CFL reduction, and the velocity cap in the friction step (`friction_velocity_cap_ms`, 15 m/s in every reported run). These are what let the same solver run a clean dam break and a continental DEM without retuning.

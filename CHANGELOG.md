@@ -14,6 +14,12 @@ installed 1.0.0, upgrade: it clips terrain above 50 m in `clean_dem` without say
 
 ### Added
 
+- Five documentation pages that did not exist: [troubleshooting](docs/troubleshooting.md)
+  organised by the message the user saw, [checkpointing](docs/checkpointing.md),
+  [cache replay](docs/cache_replay.md), [performance](docs/performance.md) measure-then-tune,
+  and a memory-sizing section in the compressed-mesh page. API pages for the
+  input-preparation modules, and the re-exported classes documented under `geoswe` so the
+  prose's own `geoswe.Config` form resolves.
 - `tests/data/` fixtures and a CI leg that installs the GIS and forcings extras, so the
   ingestion layer (`data_prep`, `gauges`, `io_geotiff`) is exercised rather than only imported.
 - `--dt-min` and `GEOSWE_DT_MIN`: a step-size floor that stops a run whose time step has
@@ -92,6 +98,16 @@ installed 1.0.0, upgrade: it clips terrain above 50 m in `clean_dem` without say
   section, and the rest name the checks that actually cover them. "dense", "flat-full" and
   "flat-active", which carry the headline accuracy and speed numbers, are defined in one place
   and used consistently.
+- A non-finite state stops a compressed run instead of being carried to the end of it. The
+  CFL reduction is the loop's safeguard, and it dropped a NaN twice over: a float maximum
+  discards it (every comparison with NaN is false), and the kernel's own wet/dry tests turn a
+  NaN depth into a finite wave speed. Measured on one active cell: an infinity was caught in
+  either channel, a NaN in either was not, and the run wrote a depth field with 7 non-finite
+  cells of 256. The reduction now runs over the IEEE bit patterns, where NaN sits above
+  infinity, and a NaN depth is tested for explicitly. No slowdown at 320 M cells per rank.
+- `SWE_DENSE_FUSE_CFL=1` is ignored, with a warning, on a full-rectangle run. The 2-D fused
+  step carries no CFL reduction, so `cfl_dt` read the zero-filled buffer and returned the
+  all-dry step: measured, the second step jumped from 1.1 s to 1596 s.
 - The dense fused step refused every kernel variant with a fused CFL reduction or fused step
   forcings. A fix inside the pre-release series added an interior gate to the kernel text
   without updating the two splice anchors that search for it, so `SWE_DENSE_FUSE_CFL=1` and

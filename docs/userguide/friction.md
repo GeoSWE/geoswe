@@ -23,7 +23,7 @@ $$
 \qquad\text{(linearized; } \texttt{friction\_quadratic\_alpha=False}\text{)}
 $$
 
-with $C_f = g\,n^2 h^{-4/3}$. Both are unconditionally stable and dissipative. The quadratic root is the exact solution of the implicit update and is the form used in every run reported in the paper; on the steady sheet-flow test it reproduces the reference film depth to within about 1 %.
+with $C_f = g\,n^2 h^{-4/3}$. Both are unconditionally stable and dissipative. The quadratic root is the exact solution of the implicit update and is the form used in every run reported in the paper: on the steady sheet-flow benchmark ({file}`benchmark/sheetflow_plane`) it reproduces the exact film depth to within 0.8 % at 3 m and 0.3 % at 1 m.
 
 ## Setting the roughness
 
@@ -68,6 +68,6 @@ grass), ~0.1+ (dense vegetation).
 
 ## Stability safeguards
 
-- `friction_velocity_cap_ms` (default 15 m/s): where the predictor speed $|\mathbf{u}^{*}|$ exceeds the cap, $n$ is raised locally to $\max(n, n_{\mathrm{cri}})$ with $n_{\mathrm{cri}} = (\Delta t\, g\, h^{-4/3} |\mathbf{u}^{*}|)^{-1/2}$, which damps the excursion over several steps instead of clipping the velocity. It is a safeguard against sharp DEM steps, not a roughness model, and it activates sparsely (a few hundred cells per hour on the county benchmark). Set to `float("inf")` to disable (fine for smooth float64 cases).
+- `friction_velocity_cap_ms` (default 15 m/s): where the predictor speed $|\mathbf{u}^{*}|$ exceeds the cap, $n$ is raised locally to $\max(n, n_{\mathrm{cri}})$ with $n_{\mathrm{cri}} = (\Delta t\, g\, h^{-4/3} |\mathbf{u}^{*}|)^{-1/2}$, which damps the excursion over several steps instead of clipping the velocity. It is a safeguard against sharp DEM steps, not a roughness model. How often it fires depends on the terrain: on a compressed run `GEOSWE_VCAP_COUNT=1` counts the activations and prints the total, which is how to tell whether it is doing real work on yours. Set to `float("inf")` to disable (fine for smooth float64 cases).
 - The friction step never increases momentum and zeroes it in dry cells, so it
   composes safely with wetting/drying.
