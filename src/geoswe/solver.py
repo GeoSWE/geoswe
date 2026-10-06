@@ -1410,6 +1410,16 @@ class Solver2D:
             raise ValueError(
                 f"set_manning_table: class id {int(cls_padded.max())} out of range "
                 f"for a {int(table.size)}-entry table (OOB device read)")
+        # Config's own warning cannot see a table set on the solver afterwards, and
+        # unlike set_manning this does not switch friction on, so the run would be
+        # silently frictionless -- with the roughness the large runs rely on in hand.
+        if self.cfg.friction is None:
+            import warnings
+            warnings.warn(
+                "set_manning_table: friction is off (Config.friction is None), so this "
+                "roughness table will not be applied and the run is frictionless. Pass "
+                "friction='manning' in the Config (set_manning switches it on for you; "
+                "this call does not, to keep an explicit Config explicit).", stacklevel=2)
         self._manning_cls = cls_padded
         self._manning_tab = table
 

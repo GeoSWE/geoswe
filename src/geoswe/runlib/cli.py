@@ -91,9 +91,10 @@ def build_parser(extra=None):
                          "scheme only (first-order SRM-HLLC + forward Euler), and --h-min-cfl "
                          "has no effect on it (SWE_HMIN_CFL does).")
     ap.add_argument("--cache-save", default=None,
-                    help="With --compressed: also save the flat structures to this dir (for --cache replay).")
-    ap.add_argument("--cache", default=None,
-                    help="Replay a flat cache (no dense domain built); ignores most build args.")
+                    help="With --compressed: also save the flat structures to this dir, for a later "
+                         "replay with `python -m geoswe.runlib.replay --cache <dir>` (no dense "
+                         "domain built). This parser has no --cache: the driver always builds the "
+                         "dense domain, and the replay tool is the entry point that does not.")
     ap.add_argument("--balanced-partition", action="store_true",
                     help="With --compressed (MPI): active-cell-balanced 1xN y-split (florida-style "
                          "cumulative-active boundaries) instead of equal grid blocks. Balances MPI load "

@@ -6,8 +6,9 @@ Helene-specific tide inputs (the NOAA CO-OPS gauge CSV map, the tide directory a
 t0) and pins one GPU per MPI rank before the CuPy-heavy imports.
 
 Both storage tiers run through here: the dense path by default, and the compressed
-active-cell mesh via ``--compressed`` (with ``--cache`` / ``--cache-save`` /
-``--balanced-partition``), which ``geoswe.runlib.driver`` dispatches.
+active-cell mesh via ``--compressed`` (with ``--cache-save`` / ``--balanced-partition``),
+which ``geoswe.runlib.driver`` dispatches. Replaying a saved cache without building the
+dense domain is a different entry point, ``python -m geoswe.runlib.replay``.
 
 Launched by ``run_3m_helene.sh``; see that script for the published invocation.
 """

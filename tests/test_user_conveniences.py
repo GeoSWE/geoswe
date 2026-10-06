@@ -160,3 +160,19 @@ def test_set_manning_table_takes_plain_arrays():
     assert s._manning_tab.dtype == np.float32 and s._manning_tab.shape == (2,)
     with pytest.raises(ValueError, match="uint8"):
         s.set_manning_table(cls.astype(np.int32), [0.03])
+
+
+def test_set_manning_table_says_when_friction_is_off():
+    # set_manning switches friction on; the table does not, and a roughness table
+    # with friction off makes the run silently frictionless. Config's own warning
+    # cannot see a table installed on the solver afterwards.
+    s = _solver(dtype="float32")                      # friction left off
+    cls = np.zeros((NX + 2 * NGH, NY + 2 * NGH), np.uint8)
+    with pytest.warns(UserWarning, match="frictionless"):
+        s.set_manning_table(cls, [0.03])
+    assert s.cfg.friction is None                     # and it stays off, as asked
+    s2 = _solver(dtype="float32", friction="manning")
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                # no warning with friction on
+        s2.set_manning_table(cls, [0.03])

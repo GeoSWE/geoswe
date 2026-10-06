@@ -54,7 +54,11 @@ The two lower-level forms take arrays on the solver's padded grid,
 table). The table is bit-identical to a full field at 1 byte per cell instead
 of 4, and is what the large runs use.
 
-A roughness without `friction="manning"` has no effect; GeoSWE warns about it.
+A roughness without `friction="manning"` has no effect, and the three entry points
+say so differently: `Config(manning_n=...)` or `Config(manning_field=...)` warns at
+construction, {py:meth}`~geoswe.Solver2D.set_manning` switches friction on for you,
+and {py:meth}`~geoswe.Solver2D.set_manning_table` warns and leaves it off, so an
+explicit `Config` stays explicit.
 In `Solver1D`, friction supports only the linearized update without the velocity
 cap: `Config(friction="manning", friction_quadratic_alpha=False,
 friction_velocity_cap_ms=float("inf"))`.

@@ -78,8 +78,42 @@ class StateSnapshots:
         self._arr.flush()
         del self._arr
         np.save(os.path.splitext(self.path)[0] + "_t.npy", self.times[: self.k])
+        # A run that stops before t_end (--n-steps, a wall-clock deadline, a divergence)
+        # wrote fewer frames than the file holds, and the trailing rows are zeros that
+        # read as dry. Shorten the array to the frames actually written so it cannot
+        # disagree with _t.npy. In place: at Pinellas scale the file is tens of GB, so
+        # np.load/np.save is not an option.
+        if self.k < self.n_times:
+            self._truncate_to(self.k)
         if self._err:
             raise self._err[0]
+
+    def _truncate_to(self, n_times):
+        """Rewrite the .npy header for ``n_times`` frames and cut the file to length."""
+        import io
+        import warnings
+        import numpy.lib.format as _fmt
+        try:
+            with open(self.path, "r+b") as f:
+                version = _fmt.read_magic(f)
+                if version != (1, 0):                 # 2.0 has a 4-byte length field
+                    raise ValueError(f"unexpected .npy version {version}")
+                hlen = int(np.frombuffer(f.read(2), dtype="<u2")[0])
+                head_end = f.tell() + hlen            # magic + version + length + header
+                body = ("{'descr': '%s', 'fortran_order': False, 'shape': (1, %d, %d, 3), }"
+                        % (self._dtype.str, n_times, self.n_cells)).encode("latin1")
+                if len(body) + 1 > hlen:
+                    raise ValueError("the shorter header does not fit the original field")
+                f.seek(head_end - hlen)
+                f.write(body + b" " * (hlen - len(body) - 1) + b"\n")
+                f.truncate(head_end + n_times * self.n_cells * 3 * self._dtype.itemsize)
+            # read it back: a half-rewritten header is worse than a long file
+            np.load(self.path, mmap_mode="r").shape
+        except Exception as e:                        # leave the long file, say why
+            warnings.warn(f"snapshots: wrote {n_times} of {self.n_times} frames and could not "
+                          f"shorten {self.path} ({type(e).__name__}: {e}); the trailing frames "
+                          f"are zeros and {os.path.splitext(self.path)[0]}_t.npy has the real "
+                          f"length", stacklevel=2)
 
 
 def load_gauge_csv(path, t0):
@@ -930,7 +964,8 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
     ring_i_loc = (ring_i[in_local] - i0_glob + ngh).astype(np.int32)
     ring_j_loc = (ring_j[in_local] - j0_glob + ngh).astype(np.int32)
     ring_bed_loc = ring_bed[in_local].astype(args.dtype)
-    # Flatten w_g for per-cell kernel access: w[k*4 + g]
+    # Flatten w_g for per-cell kernel access: w[k*NG + g], NG = len(gauge_names)
+    # (it was hardcoded to 4 once, and the stride is checked in load_case)
     w_g_loc_flat = np.ascontiguousarray(w_g[in_local].astype("float32"))
     n_ring_loc = int(in_local.sum())
     n_ring_glob = comm.allreduce(n_ring_loc, op=MPI.SUM) if comm.size > 1 else n_ring_loc
@@ -1367,6 +1402,12 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         if float(getattr(args, "storage_courant", 0.0) or 0.0) > 0.0:
             raise SystemExit("--storage-courant is implemented on the dense path only; drop --compressed "
                              "or the storage curve")
+        if float(getattr(args, "snapshot_every_s", 0.0) or 0.0) > 0.0:
+            # The snapshot writer indexes the dense padded state; the compressed branch
+            # returns before the dense loop, so it used to leave a correctly shaped file
+            # holding frame 0 and zeros, with no _t.npy beside it.
+            raise SystemExit("--snapshot-every-s is implemented on the dense path only (it samples "
+                             "the dense padded state); drop --compressed or the snapshots")
         from ..compressed_solver import CompressedSolver
         _L = locals()
         nxp_loc = Nx_loc + 2*ngh; nyp_loc = Ny_loc + 2*ngh

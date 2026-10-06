@@ -2588,7 +2588,8 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
         # dt-collapse the guard was written for. GEOSWE_MAX_STAGE_M overrides
         # for legitimate extreme cases (e.g. tsunami studies).
         _stg_max = float(np.abs(ring["stage_all"]).max()) if ring["stage_all"].size else 0.0
-        _stg_cap = float(os.environ.get("GEOSWE_MAX_STAGE_M", "15"))
+        _stg_cap = float(os.environ.get("GEOSWE_MAX_STAGE_M",
+                                        os.environ.get("SWE_MAX_STAGE_M", "15")))
         if _stg_max > _stg_cap:
             raise ValueError(
                 f"cache {cache_dir}: ring stage |max|={_stg_max:.1f} m exceeds "

@@ -155,7 +155,8 @@ compares them.
   read with another library needs `np.flipud(a).T` to become `[x, y]`, which
   `read_geotiff` does for you.
 - **No friction.** A roughness value has no effect until
-  `friction="manning"` is set; GeoSWE warns when you give one without it.
+  `friction="manning"` is set. `Config` warns when you give one without it, and so
+  does `set_manning_table`; `set_manning` switches friction on instead.
 - **Speed on the GPU.** The fastest path needs single precision (the default
   there), friction with a roughness map of at most 256 distinct values, and
   rain given as a field or not at all. `GEOSWE_VERBOSE=1` prints which path a

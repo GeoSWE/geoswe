@@ -110,6 +110,11 @@ if a.ring:
     if "stage_all" in z.files and "t_common" in z.files:
         ring_t_common = np.asarray(z["t_common"], np.float64)
         ring_stage_all = np.asarray(z["stage_all"], np.float32)
+        # the ring kernel strides w_g by the gauge count, so a stage table with another
+        # number of rows drives the tide with the wrong weights (or reads past the buffer)
+        if int(ring_stage_all.shape[0]) != ring_NG:
+            raise ValueError(f"w_g has {ring_NG} columns but stage_all holds "
+                             f"{int(ring_stage_all.shape[0])} gauges")
         log(f"    ring: {ring_i.size} 3m cells, {ring_NG} NOAA gauges, {ring_t_common.size} stage samples (bc_v29)")
     else:
         # fallback: replicate west/south case stage into NG columns (IDW weights handle blend)

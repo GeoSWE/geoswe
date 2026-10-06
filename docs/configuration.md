@@ -52,7 +52,7 @@ first-order by design.
 |---|---|---|
 | `friction` | `None` | `None` (off) or `"manning"` (also spelled `"manning_implicit"`); anything else raises |
 | `manning_n` | `0.0` | scalar Manning roughness; a map is given with `Solver2D.set_manning(n)` |
-| `manning_field` | `None` | the map on the padded grid `(nx+2*ngh, ny+2*ngh)` (overrides the scalar); `set_manning` fills it for you |
+| `manning_field` | `None` | the map on the padded grid `(nx+2*ngh, ny+2*ngh)` (overrides the scalar). `set_manning` fills it from an unpadded `(nx, ny)` array, except on a float32 GPU run, where it installs a one-byte class table instead (`set_manning_table`) and leaves this field `None`; the table takes precedence |
 | `friction_velocity_cap_ms` | `15.0` | boost $n$ above this speed; `inf` disables |
 | `friction_quadratic_alpha` | `True` | quadratic-$\alpha$ point-implicit root (the default, and what every published run used). Set `False`, or `GEOSWE_FRICTION_QUAD=0`, for the linearized root |
 
@@ -102,7 +102,7 @@ Change what is simulated or written. Read by the compressed replay path (`run_ca
 | `GEOSWE_GA_THETAD` | `SWE_GA_THETAD` | `0.10` | Green-Ampt moisture deficit override | `runlib/driver.py` |
 | `GEOSWE_GA_ZSAT` | `SWE_GA_ZSAT` | `1.5` | Green-Ampt water-table depth (m); default 1.5 | `runlib/driver.py` |
 | `GEOSWE_IC_ETA2` | `SWE_IC_ETA2` | `` | initial still-water stage (m) for the compressed replay path (the standing-tide deck uses 2.114) | `compressed_solver.py` |
-| `GEOSWE_MAX_STAGE_M` |  | `15` | cap on any prescribed ring stage (m); default 15 | `compressed_solver.py` |
+| `GEOSWE_MAX_STAGE_M` | `SWE_MAX_STAGE_M` | `15` | the largest prescribed ring stage (m) accepted before the run refuses to start: a datum mismatch (IGLD vs NAVD88) otherwise drives the tide tens of metres high. Raise it for a real extreme event (a tsunami study). Read by both entry points: the gauge CSVs in `runlib.driver` and the cached stage table | `runlib/driver.py`, `compressed_solver.py` |
 | `GEOSWE_NO_RAIN` | `SWE_NO_RAIN` | `` | 1 = switch rainfall off | `compressed_solver.py` |
 | `GEOSWE_RAIN_NPZ` | `SWE_RAIN_NPZ` | `` | gridded rainfall table (.npz) for the compressed replay path | `compressed_solver.py` |
 | `GEOSWE_RAIN_SCALE` | `SWE_RAIN_SCALE` | `1` | multiply the rainfall table by this factor (the x10 stress test); default 1 | `compressed_solver.py` |

@@ -99,6 +99,26 @@ def load_case(case_path, bc_path, *, dtype="float32", nhd_path=None, channel_bed
     w_g = bc["w_g"].astype("float32")
     gauge_names = [str(x) for x in bc["gauge_names"]]
     gauge_pos_utm = bc["gauge_pos_utm"]  # (N_gauges, 2)
+    # The ring kernel strides w_g by len(gauge_names) and nothing checked the two agree.
+    # Three columns against four names reads 4*n_ring floats out of a 3*n_ring buffer --
+    # adjacent pool bytes, driving the tide with garbage -- and five columns silently
+    # applies the wrong weights. The same unchecked count is baked into the kernel source,
+    # reaches the compressed path and is persisted into the checkpoint metadata, so one bad
+    # bc file corrupts the dense run, the compressed run and every replay from it.
+    if w_g.ndim == 1:                       # a single gauge may be written as a flat column
+        w_g = w_g.reshape(-1, 1)
+    if w_g.ndim != 2 or w_g.shape[1] != len(gauge_names):
+        raise ValueError(
+            f"bc file {bc_path}: w_g has shape {tuple(w_g.shape)} but there are "
+            f"{len(gauge_names)} gauges {gauge_names}; it must be "
+            f"(n_ring, {len(gauge_names)}), one interpolation weight per ring cell per gauge")
+    for _name, _arr in (("ring_j", ring_j), ("ring_bed", ring_bed), ("w_g", w_g)):
+        if len(_arr) != len(ring_i):
+            raise ValueError(f"bc file {bc_path}: {len(ring_i)} ring_i but {len(_arr)} {_name}; "
+                             f"the ring arrays must all have one entry per ring cell")
+    if len(gauge_pos_utm) != len(gauge_names):
+        raise ValueError(f"bc file {bc_path}: {len(gauge_names)} gauge names but "
+                         f"{len(gauge_pos_utm)} gauge positions")
 
     nx_glob, ny_glob = bed_glob.shape
 

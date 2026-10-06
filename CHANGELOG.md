@@ -69,6 +69,22 @@ First public release.
 - `Config` warns when `recon` is set with `well_balanced=True`, where the well-balanced face
   states discard it. The two examples and two tests that paired them, and so were not the
   higher-order runs they said they were, now pass `well_balanced=False`.
+- `runlib.case.load_case` checks the ring-boundary arrays. The ring kernel strides the
+  interpolation weights by the gauge count and nothing related the two, so a weight matrix
+  with the wrong number of columns read past its buffer and drove the tide with it.
+- `--snapshot-every-s` is refused with `--compressed`, where it wrote a correctly shaped file
+  holding one real frame and zeros, and no `snapshots_t.npy` at all. A dense run that stops
+  early now shortens the file to the frames it wrote, so its shape cannot disagree with the
+  time vector beside it.
+- The dead `--cache` flag is gone from the driver's parser. It was documented as replaying a
+  flat cache, the driver never read it, and passing it rebuilt the whole dense domain:
+  `python -m geoswe.runlib.replay --cache <dir>` is the entry point that does not.
+- `GEOSWE_MAX_STAGE_M` raises the ring-stage datum guard on both entry points. It was
+  documented as a cap on any prescribed stage and read only by the cached path, so on a first,
+  uncached run the hardcoded 15 m could not be overridden.
+- `set_manning_table` warns when friction is off. Unlike `set_manning` it does not switch
+  friction on, so the run was silently frictionless with the roughness table the large runs
+  rely on in hand.
 
 ## Compatibility promise for 1.x
 
