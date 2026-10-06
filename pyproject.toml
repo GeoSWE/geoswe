@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # One token for the distribution, the repository and the import name.
 name = "geoswe"
-version = "1.1.0"
+version = "1.1.1"
 description = "GeoSWE (Geophysical Shallow-Water Engine): a GPU flood solver with a NumPy CPU fallback."
 readme = "README.md"
 requires-python = ">=3.10"

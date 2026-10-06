@@ -14,7 +14,7 @@ authors:
     given-names: Peng
     email: pchen402@gatech.edu
     affiliation: "Georgia Institute of Technology"
-version: "1.1.0"
+version: "1.1.1"
 date-released: "2026-10-06"
 license: BSD-3-Clause
 repository-code: "https://github.com/GeoSWE/geoswe"

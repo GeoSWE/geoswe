@@ -50,7 +50,7 @@ from .mesh import Mesh1D, Mesh2D
 from .solver import Config, Solver1D, Solver2D
 from .forcing import RainfallForcing, StageBoundary
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 __all__ = [
     # backend control

@@ -5,6 +5,31 @@ All notable changes to GeoSWE are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) under the compatibility
 promise below.
 
+## [1.1.1] - 2026-10-06
+
+Documentation and comments. No change to the solver, and no change to any result: the test
+suite and every published number are identical to 1.1.0.
+
+### Fixed
+
+- Two places advertised `python -m geoswe.runlib.replay` as a command, which parses nothing
+  and exits 0 because the module has no `__main__` block: the `--cache-save` help and the 3 m
+  runner's docstring. They now name what works, `geoswe.runlib.replay.main` called from a
+  runner, as `benchmark/pinellas_3m/run_cache_3m.py` does.
+- Setting `SWE_GHOST_ETA_RAMP_MMHR` raised with "Drop the variable or use the research tree",
+  pointing a user at a tree that is not public. It now says the ramp would be ignored and to
+  unset the variable.
+- The installation and citing pages say to pin the version for work that will be published,
+  and point at the per-version documentation URL. 1.0.0 and 1.1.0 give different answers on
+  the same input, so a methods section that says only "GeoSWE" does not identify what ran.
+- The GitHub Pages copy of the documentation is current again. It had frozen when publishing
+  moved to Read the Docs, so the address that is in circulation was serving the documentation
+  of an earlier release. Read the Docs remains canonical.
+- A pass over the comments that narrated the project's history rather than the code: the
+  internal optimisation labels, the dates on decisions whose flag name already carries the
+  meaning, and the references to a tree that does not ship. The comments that justify a choice
+  with the measurement behind it are untouched.
+
 ## [1.1.0] - 2026-10-06
 
 Everything the pre-release review produced. 1.0.0 was uploaded to PyPI before the review
