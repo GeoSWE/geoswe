@@ -804,8 +804,13 @@ class Solver1D:
 
     def _pad_bed(self):
         ngh = self.mesh.ngh
-        self.b[:ngh] = self.b[ngh]
-        self.b[-ngh:] = self.b[-ngh - 1]
+        # As in Solver2D: a periodic axis wraps the bed, so that eta = h + b has no seam.
+        if self.cfg.bc_x == "periodic":
+            self.b[:ngh] = self.b[-2 * ngh : -ngh]
+            self.b[-ngh:] = self.b[ngh : 2 * ngh]
+        else:
+            self.b[:ngh] = self.b[ngh]
+            self.b[-ngh:] = self.b[-ngh - 1]
 
     def _apply_bc(self):
         cfg = self.cfg
@@ -991,9 +996,14 @@ class Solver1D:
             q_int[1] = q_int[1] / denom
             self.q[:, interior] = q_int
 
-        # Wet/dry: zero momentum in dry cells
+        # Wet/dry: zero the momentum of dry cells, and keep their (sub-floor) depth unless
+        # SWE_WETDRY_ZERO_H asks for the old behaviour, as Solver2D and the fused kernels do.
+        # Deleting the depth here was a mass sink the other paths do not have.
         dry = self.q[0] < cfg.h_min
-        self.q[0] = np.where(dry, 0.0, self.q[0])
+        if _WETDRY_KEEP_H == "1":
+            self.q[0] = np.where(dry, np.maximum(self.q[0], 0.0), self.q[0])
+        else:
+            self.q[0] = np.where(dry, 0.0, self.q[0])
         self.q[1] = np.where(dry, 0.0, self.q[1])
 
         self.t += dt
@@ -1192,11 +1202,23 @@ class Solver2D:
 
     def _pad_bed(self):
         ngh = self.mesh.ngh
-        # Extrapolate bed into ghost regions
-        self.b[:ngh, :] = self.b[ngh : ngh + 1, :]
-        self.b[-ngh:, :] = self.b[-ngh - 1 : -ngh, :]
-        self.b[:, :ngh] = self.b[:, ngh : ngh + 1]
-        self.b[:, -ngh:] = self.b[:, -ngh - 1 : -ngh]
+        # Fill the ghost bed the way the ghost STATE is filled on each axis. A periodic axis
+        # wraps: zero-gradient extrapolation there would leave eta = h + b with a jump at the
+        # seam, which breaks lake-at-rest and makes a one-rank run disagree with a partitioned
+        # one (the halo exchange wraps the bed correctly through `periods=`).
+        # x first, over the full x extent, so a doubly periodic corner takes both wraps.
+        if self.cfg.bc_x == "periodic":
+            self.b[:ngh, :] = self.b[-2 * ngh : -ngh, :]
+            self.b[-ngh:, :] = self.b[ngh : 2 * ngh, :]
+        else:
+            self.b[:ngh, :] = self.b[ngh : ngh + 1, :]
+            self.b[-ngh:, :] = self.b[-ngh - 1 : -ngh, :]
+        if self.cfg.bc_y == "periodic":
+            self.b[:, :ngh] = self.b[:, -2 * ngh : -ngh]
+            self.b[:, -ngh:] = self.b[:, ngh : 2 * ngh]
+        else:
+            self.b[:, :ngh] = self.b[:, ngh : ngh + 1]
+            self.b[:, -ngh:] = self.b[:, -ngh - 1 : -ngh]
 
     def set_inside_mask(self, mask, cfl_robust_pct=None):
         """Choose the cells that are updated: the active set.
