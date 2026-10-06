@@ -168,6 +168,10 @@ void cfl_lammax_flat(
     int k = blockIdx.x*blockDim.x + threadIdx.x;
     if (k >= N || act[k] == 0) return;
     float h = q0[k];
+    // A NaN depth would otherwise be sanitized by the two tests below (h > 0.0f and
+    // h > h_min_cfl are both false for it) and contribute a finite lambda, so the run would
+    // carry it to t_end. 0x7fc00000 is a quiet NaN: the host's dt=0.0 sentinel fires on it.
+    if (h != h) { atomicMax(out_bits, 0x7fc00000u); return; }
     if (h < h_min) return;                       // physics wet/dry threshold (UNCHANGED)
     float hs = h > h_min_cfl ? h : h_min_cfl;    // velocity divisor floor (decoupled: SWE_HMIN_CFL).
     float u = q1[k]/hs, v = q2[k]/hs;            // h_min_cfl>h_min suppresses spurious thin-film u -> bigger dt
@@ -201,28 +205,36 @@ void cfl_lammax_flat_blk(
     const int N, const float g, const float h_min, const float h_min_cfl,
     unsigned int* __restrict__ out_bits)
 {
-    __shared__ float smax[256];
-    float lam = 0.0f;
+    // The reduction runs over the IEEE bit patterns, not the floats: for a non-negative
+    // float the unsigned order IS the float order, and NaN sits above +Inf, so a
+    // non-finite lambda survives to the atomicMax instead of being dropped. A float
+    // comparison drops it, because every comparison with NaN is false, and the host's
+    // dt=0.0 sentinel then never fires: measured, an Inf in one active cell was caught
+    // and a NaN ran to t_end and returned a non-finite depth field.
+    __shared__ unsigned int smax[256];
+    unsigned int lam = 0u;
     for (int k = blockIdx.x*blockDim.x + threadIdx.x; k < N;
          k += gridDim.x*blockDim.x) {
         if (act[k] == 0) continue;
         float h = q0[k];
+        if (h != h) { lam = 0x7fc00000u; continue; }   // see the per-cell kernel above
         if (h < h_min) continue;
         float hs = h > h_min_cfl ? h : h_min_cfl;
         float u = q1[k]/hs, v = q2[k]/hs;
         float c = sqrtf(g * (h > 0.0f ? h : 0.0f));
         float l = (sqrtf(u*u + v*v) + c) * inv_sig[k];
-        lam = l > lam ? l : lam;
+        unsigned int lb = __float_as_uint(l);
+        lam = lb > lam ? lb : lam;
     }
     smax[threadIdx.x] = lam; __syncthreads();
     for (int s = 128; s > 0; s >>= 1) {
         if (threadIdx.x < s) {
-            float o = smax[threadIdx.x + s];
+            unsigned int o = smax[threadIdx.x + s];
             if (o > smax[threadIdx.x]) smax[threadIdx.x] = o;
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) atomicMax(out_bits, __float_as_uint(smax[0]));
+    if (threadIdx.x == 0) atomicMax(out_bits, smax[0]);
 }
 """
 _CFL_LAMMAX_FLAT_BLK_NS_SRC = _CFL_LAMMAX_FLAT_BLK_SRC.replace(
@@ -2553,18 +2565,20 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
     """Load the flat cache straight to GPU (no dense domain) and run the loop.
     Under MPI (comm.size>1) each rank loads cache_dir/r<rank>/ and rebuilds its halo.
 
-    ``dt_max`` caps the time step, in seconds. Unlike :meth:`CompressedSolver.run` this
-    path applies no rain cap of its own: the published cached benchmark replays with rain,
-    and the cap would change its step schedule. Without one, rain on a dry bed takes the
-    dry-partition CFL step, 478.9 s at dx = 3 m, and lays that whole interval of rain down
-    in one go. Pass ``dt_max="rain"`` for the same film bound :meth:`CompressedSolver.run`
-    applies (27.4 s on that grid at 40 mm/h), or a number for a cap of your own. That
+    ``dt_max`` caps the time step, in seconds. Unlike
+    :meth:`CompressedSolver.run <geoswe.CompressedSolver.run>` this path applies no rain
+    cap of its own: the published cached benchmark replays with rain, and the cap would
+    change its step schedule. Without one, rain on a dry bed takes the dry-partition CFL
+    step, 478.9 s at dx = 3 m, and lays that whole interval of rain down in one go. Pass
+    ``dt_max="rain"`` for the same film bound
+    :meth:`CompressedSolver.run <geoswe.CompressedSolver.run>` applies (27.4 s on that
+    grid at 40 mm/h), or a number for a cap of your own. That
     bound is read from the rain table in the cache, so the ``GEOSWE_RAIN_NPZ`` and
     ``GEOSWE_RAIN_UNIFORM_MMHR`` overrides, which the loop applies afterwards, do not move
     it; pass the cap as a number when you replay another deck through them.
     ``dt_min`` raises when the step collapses below it, instead of grinding on to the job's
     wall clock; it defaults to ``GEOSWE_DT_MIN`` (0 = off). ``say=None`` gives a silent run,
-    as in :meth:`CompressedSolver.run`.
+    as in :meth:`CompressedSolver.run <geoswe.CompressedSolver.run>`.
     """
     if say is None:        # the sibling entry point installs a no-op for this; it used to
         say = lambda *a, **k: None      # die here with TypeError: 'NoneType' is not callable
@@ -3137,7 +3151,7 @@ class CompressedSolver:
 
     @property
     def n_stored(self):
-        """Number of stored cells: the active cells plus their two-cell halo."""
+        """Number of stored cells, the active cells plus their two-cell halo."""
         return int(self.cs.N_stored)
 
     def depth(self):

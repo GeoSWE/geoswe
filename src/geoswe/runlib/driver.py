@@ -237,7 +237,12 @@ def _run_case(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype, sponge_
         t_s, eta = load_gauge_csv(path, t0_ts)
         if len(t_s) == 0:
             raise ValueError(f"gauge {n!r}: CSV {path} has no valid (Date Time, Water Level) rows")
-        if np.abs(eta).max() > 15.0:   # physical surge bound (catches IGLD/MSL datum pollution)
+        # physical surge bound (catches IGLD/MSL datum pollution). GEOSWE_MAX_STAGE_M raises
+        # it for a legitimate extreme case, a tsunami study, and it is the same variable the
+        # cached stage table reads, so one knob covers both entry points.
+        _max_stage = float(os.environ.get("GEOSWE_MAX_STAGE_M",
+                                          os.environ.get("SWE_MAX_STAGE_M", "15.0")))
+        if np.abs(eta).max() > _max_stage:
             raise ValueError(f"gauge {n!r}: |stage| {np.abs(eta).max():.1f}m > 15m -- likely a datum "
                              f"mismatch (IGLD vs MSL/NAVD88) polluting the ring; scrub the gauge table")
         gauge_data.append((t_s, eta))

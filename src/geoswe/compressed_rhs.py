@@ -983,8 +983,8 @@ _FUSE_CFL_EXTRA_PARAMS = (
 
 _PRE_A_FLAT_FUSED_CFL = (
     "    const int k = blockIdx.x * blockDim.x + threadIdx.x;\n"
-    "    __shared__ float _smax[1024];\n"
-    "    float _lam = 0.0f;\n"
+    "    __shared__ unsigned int _smax[1024];\n"   # IEEE bits, so a NaN lambda survives
+    "    unsigned int _lam = 0u;\n"
     "    bool _skip = (k >= nx);              // nx repurposed = N_stored\n"
     "    const int idx = _skip ? 0 : k;\n"
     "    const unsigned char _ia = _skip ? (unsigned char)0 : is_active[k];\n"
@@ -999,8 +999,8 @@ _PRE_A_FLAT_FUSED_CFL = (
 
 _PRE_A_FLAT_FUSED_GATHER_CFL = (
     "    const int _tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
-    "    __shared__ float _smax[1024];\n"
-    "    float _lam = 0.0f;\n"
+    "    __shared__ unsigned int _smax[1024];\n"   # IEEE bits, so a NaN lambda survives
+    "    unsigned int _lam = 0u;\n"
     "    bool _skip = (_tid >= nx);           // nx repurposed = list length\n"
     "    const int k = _skip ? 0 : region[_tid];\n"
     "    const int idx = k;\n"
@@ -1018,12 +1018,14 @@ _PRE_A_FLAT_FUSED_GATHER_CFL = (
 _LAM_BLOCK = (
     "        {\n"
     "            float h = _q0;\n"
-    "            if (h >= h_min) {\n"
+    "            if (h != h) { _lam = 0x7fc00000u; }      // a NaN depth is sanitized by the\n"
+    "            else if (h >= h_min) {                   // tests below; keep it reducible\n"
     "                float hs = h > h_min_cfl ? h : h_min_cfl;\n"
     "                float u = _q1/hs, v = _q2/hs;\n"
     "                float c = sqrtf(g * (h > 0.0f ? h : 0.0f));\n"
     "                float l = cfl_use_sig ? (sqrtf(u*u + v*v) + c) * inv_sig[idx] : (sqrtf(u*u + v*v) + c);\n"
-    "                _lam = l > _lam ? l : _lam;\n"
+    "                unsigned int _lb = __float_as_uint(l);\n"
+    "                _lam = _lb > _lam ? _lb : _lam;\n"
     "            }\n"
     "        }\n")
 
@@ -1032,12 +1034,12 @@ _CFL_REDUCE_TAIL = (
     "    _smax[threadIdx.x] = _lam; __syncthreads();\n"
     "    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {\n"
     "        if (threadIdx.x < s) {\n"
-    "            float o = _smax[threadIdx.x + s];\n"
+    "            unsigned int o = _smax[threadIdx.x + s];\n"
     "            if (o > _smax[threadIdx.x]) _smax[threadIdx.x] = o;\n"
     "        }\n"
     "        __syncthreads();\n"
     "    }\n"
-    "    if (threadIdx.x == 0 && _smax[0] > 0.0f) atomicMax(cfl_bits, __float_as_uint(_smax[0]));\n")
+    "    if (threadIdx.x == 0 && _smax[0] != 0u) atomicMax(cfl_bits, _smax[0]);\n")
 
 
 def _wrap_pre_b_cfl(pre_b):
@@ -1100,7 +1102,7 @@ _FORCINGS_GATHER_CFL_SRC = _FORCINGS_GATHER_SRC.replace(
     "    const float dt, const float g, const float h_min, const float vcap, const int use_quadratic,\n"
     "    unsigned int* __restrict__ cfl_bits, const float h_min_cfl, const int cfl_use_sig)").replace(
     "    const int tid = blockIdx.x * blockDim.x + threadIdx.x;\n    if (tid >= n) return;\n    const int k = bidx[tid];\n",
-    "    const int tid = blockIdx.x * blockDim.x + threadIdx.x;\n    __shared__ float _smax[1024];\n    float _lam = 0.0f;\n"
+    "    const int tid = blockIdx.x * blockDim.x + threadIdx.x;\n    __shared__ unsigned int _smax[1024];\n    unsigned int _lam = 0u;\n"
     "    const bool _skip = (tid >= n);\n    const int k = _skip ? 0 : bidx[tid];\n    if (!_skip) {\n").replace(
     "    qn0[k] = _q0; qn1[k] = _q1; qn2[k] = _q2;\n    if (have_max) { if (_q0 > max_h[k]) max_h[k] = _q0; }\n}\n",
     "    qn0[k] = _q0; qn1[k] = _q1; qn2[k] = _q2;\n    if (have_max) { if (_q0 > max_h[k]) max_h[k] = _q0; }\n"

@@ -2190,6 +2190,22 @@ class Solver2D:
         storage = inv_sig is not None
         # the fused lambda reduction has no 1/sigma term, so storage runs keep the separate CFL pass
         fcfl = bool(getattr(self, "_dense_fcfl", False)) and not storage
+        if fcfl and self.inside_mask is None:
+            # The 2-D fused step (the full-rectangle path, no compact list) carries no
+            # lambda reduction, so cfl_dt would read the zero-filled buffer, floor it at
+            # the all-dry wave speed sqrt(g*h_min_cfl) and hand back the all-dry step:
+            # measured on a 10 m grid, the second step jumped from 1.1 s to 1596 s and the
+            # depth passed 1e13 m within four. Ignore the switch here rather than diverge.
+            fcfl = False
+            if not getattr(self, "_fcfl_nomask_warned", False):
+                self._fcfl_nomask_warned = True
+                if self.comm is None or self.comm.rank == 0:
+                    import warnings
+                    warnings.warn(
+                        "SWE_DENSE_FUSE_CFL=1 is ignored on a full-rectangle run: the 2-D fused "
+                        "step carries no CFL reduction, so the next step would come from an "
+                        "empty buffer. Call set_inside_mask(...) to take the compact path, "
+                        "which honours it.", RuntimeWarning, stacklevel=3)
         sto_k = self._storage_curve_k(dt) if storage else None
         curve = sto_k is not None
         sto_extra = ((inv_sig, np.float32(sto_k)) if curve else (inv_sig,)) if storage else ()
