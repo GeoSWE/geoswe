@@ -254,16 +254,11 @@ print("OK", r, r3)
 
 
 @pytest.mark.gpu
-def test_gpu_refuses_a_halo_the_kernel_would_skip(tmp_path):
+def test_gpu_refuses_a_halo_the_kernel_would_skip(tmp_path, gpu_child_env):
     pytest.importorskip("cupy")
     script = tmp_path / "halo_width_gpu.py"
     script.write_text(_GPU_SCRIPT)
-    import os as _os
-    env = {"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
-    for k in ("CUDA_VISIBLE_DEVICES", "LD_LIBRARY_PATH", "CUDA_HOME"):
-        if k in _os.environ:
-            env[k] = _os.environ[k]
     r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
-                       env=env, timeout=900)
+                       env=gpu_child_env, timeout=900)
     assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
     assert "OK" in r.stdout

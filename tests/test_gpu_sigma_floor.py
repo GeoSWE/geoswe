@@ -22,7 +22,6 @@ same function's CPU fallback, called in-process on the numpy backend conftest pi
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -33,8 +32,6 @@ from geoswe.elliptic_cuda import solve_sigma_2d_cuda
 
 pytestmark = pytest.mark.gpu   # needs a usable CUDA device; auto-skipped otherwise (conftest)
 cp = pytest.importorskip("cupy")
-
-SRC = Path(__file__).resolve().parents[1] / "src"
 
 DX = 1.0            # dx=dy=1 so inv2dx = 0.5/dx and 1/(2 dx) agree bit for bit
 ALPHA = 1.0
@@ -93,16 +90,11 @@ print(json.dumps(res))
 '''
 
 
-def _on_gpu(tmp_path, case):
+def _on_gpu(tmp_path, case, env):
     """Run one case on the device; return (results dict, the q it used, {dtype: sigma})."""
     script = tmp_path / f"sigma_floor_{case}.py"
     script.write_text(_SCRIPT % dict(DX=DX, ALPHA=ALPHA, SWEEPS=SWEEPS, H_MIN=H_MIN,
                                      SIGMA_H_MIN=SIGMA_H_MIN, NX=NX, NY=NY, I0=I0, J0=J0))
-    env = {"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
-    import os as _os
-    for k in ("CUDA_VISIBLE_DEVICES", "LD_LIBRARY_PATH", "CUDA_HOME"):
-        if k in _os.environ:
-            env[k] = _os.environ[k]
     r = subprocess.run([sys.executable, str(script), str(tmp_path), case],
                        capture_output=True, text=True, env=env, timeout=900)
     assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
@@ -112,9 +104,9 @@ def _on_gpu(tmp_path, case):
     return res, q, sig
 
 
-def test_sigma_rhs_gates_a_dry_cell_like_the_cpu_path(tmp_path):
+def test_sigma_rhs_gates_a_dry_cell_like_the_cpu_path(tmp_path, gpu_child_env):
     """One floor, a sub-floor film carrying momentum: GPU and CPU must agree on u = 0 there."""
-    res, q, sig = _on_gpu(tmp_path, "film")
+    res, q, sig = _on_gpu(tmp_path, "film", gpu_child_env)
     assert res["iters_float64"] == SWEEPS
 
     # The same function's CPU fallback, on the backend conftest pinned.
@@ -128,9 +120,9 @@ def test_sigma_rhs_gates_a_dry_cell_like_the_cpu_path(tmp_path):
         f"GPU max {np.abs(sig['float64']).max():.6g} against CPU {np.abs(ref).max():.6g}")
 
 
-def test_sigma_velocity_floor_is_separate_from_the_operator_clamp(tmp_path):
+def test_sigma_velocity_floor_is_separate_from_the_operator_clamp(tmp_path, gpu_child_env):
     """sigma_h_min = 1.0 m must clamp the operator only, never divide the momentum."""
-    res, q, sig = _on_gpu(tmp_path, "clamp")
+    res, q, sig = _on_gpu(tmp_path, "clamp", gpu_child_env)
 
     # u at the one moving cell, recovered from the right-hand side the kernel wrote.
     # 5.0 = hu/h. The operator clamp would give 0.05, its own dry gate 0.

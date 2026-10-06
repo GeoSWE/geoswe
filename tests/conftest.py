@@ -21,6 +21,7 @@ ones (CuPy's ROCm build), where the compile step fails when the ROCm module is n
 loaded.
 """
 import os
+import shutil
 import subprocess
 import sys
 
@@ -99,6 +100,27 @@ def _cuda_usable() -> "tuple[bool, str]":
                 if "OutOfMemoryError" in detail else "")
         return False, (f"a GPU is visible but this environment cannot {detail}.{hint}")
     return True, ""
+
+
+# What a child process has to inherit to reach the GPU, for the tests that give theirs
+# nothing else, so that a performance switch exported by the caller cannot reach it.
+# NVIDIA: the device selection and the toolkit. AMD: CuPy's ROCm build refuses to import
+# without ROCM_HOME, and the HIP_ and ROCR_ variables are the device selection there.
+_GPU_ENV = ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "CUDA_HOME",
+            "ROCM_HOME", "ROCM_PATH", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+
+
+@pytest.fixture
+def gpu_child_env(tmp_path):
+    """A clean environment for a child that runs GPU code: ``src/`` importable, HOME in
+    ``tmp_path`` (so the kernel cache starts empty), and the variables of ``_GPU_ENV``."""
+    env = {"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"), "PATH": "/usr/bin:/bin",
+           "HOME": str(tmp_path)}
+    env.update({k: os.environ[k] for k in _GPU_ENV if k in os.environ})
+    hipcc = shutil.which("hipcc")
+    if hipcc:      # CuPy's ROCm build runs `hipcc` by name to find its include directories
+        env["PATH"] = os.path.dirname(hipcc) + os.pathsep + env["PATH"]
+    return env
 
 
 def pytest_collection_modifyitems(config, items):

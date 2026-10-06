@@ -12,15 +12,12 @@ conftest pins the numpy backend.
 """
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 
 pytestmark = pytest.mark.gpu
 cp = pytest.importorskip("cupy")
-
-SRC = Path(__file__).resolve().parents[1] / "src"
 
 _SCRIPT = r'''
 import os, sys
@@ -83,14 +80,10 @@ print("OK", float(q_f[0].max()), float(maxh_full_f.max()))
 '''
 
 
-def test_fused_step_does_not_read_rain_outside_the_interior(tmp_path):
+def test_fused_step_does_not_read_rain_outside_the_interior(tmp_path, gpu_child_env):
     script = tmp_path / "fused_rain_ghost.py"
     script.write_text(_SCRIPT)
-    env = {"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
-    import os as _os
-    for k in ("CUDA_VISIBLE_DEVICES", "LD_LIBRARY_PATH", "CUDA_HOME"):
-        if k in _os.environ:
-            env[k] = _os.environ[k]
-    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env, timeout=900)
+    r = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=gpu_child_env,
+                       timeout=900)
     assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
     assert "OK" in r.stdout
