@@ -1971,6 +1971,21 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
                   and not infil_on and not (sponge_on and sp_n) and not ring_on and not ga_drain_on
                   and not clamp_on and not drain_on and not (_hcap > 0.0) and not _infl
                   and _rs is None and _re is None and _uk is None)   # release: ring stage/extrap = ghost stage
+    if comm is not None and comm.size > 1:
+        # Every flag above is rank-local (a sponge, ring, clamp, drain or inlet can live on a
+        # subset of ranks), but the two schemes post DIFFERENT collectives: fused/early posts an
+        # Iallreduce at the end of the step, the plain path a blocking allreduce at the top. Ranks
+        # that disagree issue collectives in different orders on the same communicator, which MPI
+        # does not allow. MIN puts every rank on the plain path as soon as one rank has a forcing.
+        from mpi4py import MPI as _Mc
+        _cfl_fused = bool(comm.allreduce(int(_cfl_fused), _Mc.MIN))
+        _cfl_early = bool(comm.allreduce(int(_cfl_early), _Mc.MIN))
+        # The inlet reduction in the step loop is a blocking collective guarded by the rank-local
+        # `_infl`; ranks that disagree on the inlet count would deadlock there instead of failing.
+        _nin = comm.allgather(len(_infl))
+        if any(c != _nin[0] for c in _nin):
+            raise RuntimeError(f"discharge inlets differ across ranks ({_nin}) -- pass the same "
+                               "`inflows` list on every rank (entries may hold no local cells)")
     _lam_next = None; _dtreq_next = None; _dtl_next = None
     # SWE_FLAT_FUSE_CFL_CHECK=1 (debug): compare the fused lambda with the standalone kernel every step
     _fcfl_check = os.environ.get('SWE_FLAT_FUSE_CFL_CHECK', '0') == '1'; _fcfl_nbad = 0
