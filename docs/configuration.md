@@ -124,33 +124,51 @@ Change what is simulated or written. Read by the compressed replay path (`run_ca
 | `SWE_TIF_ZLEVEL` |  | `1` | GeoTIFF deflate level | `io_geotiff.py` |
 | `SWE_WETDRY_ZERO_H` |  | `` | 1 = delete sub-floor depth (pre-2026-08); unset = keep-h (momentum zeroed, depth kept) | `compressed_solver.py` |
 
+### Changes results
+
+These seven change the computed trajectory, not the speed. A run that sets one is a
+different numerical experiment: re-verify the case against its reference before
+publishing a number from it, and record the setting beside the result.
+
+| Variable | `SWE_` alias | Default | Effect | Read in |
+|---|---|---|---|---|
+| `SWE_BED_GRAD_LIMITER` |  | `central` | bed-gradient limiter: `central` (default) or a limited form. Not a tuning knob: the limited form is recorded in its own source comment as breaking the Milton case (composite score 0.580 to 0.087) | `compressed_rhs.py` |
+| `SWE_CFL_LINF` |  | `0` | 1 = the L-infinity velocity norm, `max(abs(u), abs(v))`, in the CFL, as the dense solver uses (the benchmark configurations); default: the Euclidean norm (the applications). A different norm is a different time-step schedule, so the runs diverge bitwise from the first step. Set it to 1 when comparing the dense and compressed paths | `compressed_solver.py` |
+| `CFL_RESAMPLE_EVERY` |  | `1` | recompute the global time step every N steps of a compressed run (1 = every step, as in every published run). Above 1 the step is held for N-1 steps and shrunk by the safety factor below | `compressed_solver.py` |
+| `CFL_RESAMPLE_SAFETY` |  | `0.95` | factor applied to the reused step when `CFL_RESAMPLE_EVERY` > 1 | `compressed_solver.py` |
+| `GEOSWE_SIGMA_FREE_CFL` | `SIGMA_FREE_CFL` | auto | 1 = ignore sub-grid channel storage in the CFL (driver). Left unset, the driver sets it to 1 when the storage floor is at least 0.20 and leaves it off below that, so the effective default depends on the case: set it explicitly for a controlled comparison | `runlib/driver.py` |
+| `GEOSWE_HIP_FP_CONTRACT` |  | `off` | AMD GPUs only: how the ROCm compiler may fuse `a*b + c` into one multiply-add. `off` (default) never, `on` within one source expression, `fast` at the optimizer's discretion. `fast` breaks the bit-identity of the fused and split steps; see [AMD GPUs](amd_gpus.md) | `backend.py` |
+| `SWE_ALLOW_LIMITER_DRIFT` |  | `` | a guard override, not a knob: 1 permits a limiter/kernel-template mismatch instead of failing loudly. The mismatch means the kernel is not applying the limiter the configuration asks for. Never for production | `rhs_cuda.py` |
+
 ### Performance
 
-Numerics-neutral: every switch is verified bit-identical on the benchmark cases, and the default is the fast path. Tune only for large runs.
+These change how the work is scheduled and what is allocated, not the arithmetic:
+kernel fusion, launch geometry, register caps, memory layout, communication order. The
+default is the fast path in each case, so tune them only for large runs.
+
+Numerics-neutral by construction, and checked where it matters:
+`tests/test_gpu_dense_fused_forcings.py` asserts a zero difference for the two fusion
+switches it covers, `tests/mpi_bitcheck.py` compares partitions of one case,
+`benchmark/scaling_640m/run_bitcheck.sh` compares the dense and flat layouts, and
+`benchmark/frontier_amd/partition_check.py` does the same on AMD GPUs. None of that
+runs in CI, which is CPU-only (`pytest -m "not gpu"`).
 
 | Variable | `SWE_` alias | Default | Effect | Read in |
 |---|---|---|---|---|
 | `GEOSWE_FROMDENSE_BUILD_STAGGER` | `SWE_FROMDENSE_BUILD_STAGGER` | `1` | stagger the dense->compressed build across N groups to bound peak memory | `compressed_solver.py` |
 | `GEOSWE_FROMDENSE_SIGMA_DUMMY` | `SWE_FROMDENSE_SIGMA_DUMMY` | `` | 1 = length-1 sigma placeholder when no sigma storage is used | `compressed_solver.py` |
-| `GEOSWE_HIP_FP_CONTRACT` |  | `off` | AMD GPUs only: how the ROCm compiler may fuse `a*b + c` into one multiply-add. `off` (default) never, `on` within one source expression, `fast` at the optimizer's discretion. `fast` breaks the bit-identity of the fused and split steps; see [AMD GPUs](amd_gpus.md) | `backend.py` |
-| `GEOSWE_SIGMA_FREE_CFL` | `SIGMA_FREE_CFL` | `0` | 1 = ignore sub-grid storage in the CFL (driver) | `runlib/driver.py` |
 | `GEOSWE_DENSE_FUSE_STORAGE` |  | `1` | 1 (default) = runs with sub-grid channel storage take the dense fused step; 0 = the split kernels. Bit-identical | `solver.py` |
 | `GEOSWE_DENSE_FUSE_STEP_FORCINGS` |  | `0` | 1 = the driver's sponge, Green-Ampt/drain and CFL reduction run inside the dense fused step. Bit-identical | `runlib/driver.py` |
 | `GEOSWE_DENSE_FUSE_STEP_CFL` |  | `1` | with the previous switch: 1 (default) = also reduce the next CFL there | `runlib/driver.py` |
 | `GEOSWE_DENSE_CARRY_ACTIVE` |  | `0` | 1 = with the fused step forcings, skip carried cells that cannot change. Bit-identical | `solver.py` |
 | `GEOSWE_RAIN_FRAME_CACHE` |  | `0` | 1 = the driver keeps the gathered rain field of the current frame on the device | `runlib/driver.py` |
-| `CFL_RESAMPLE_EVERY` |  | `1` | recompute the global time step every N steps of a compressed run (1 = every step, as in every published run) | `compressed_solver.py` |
-| `CFL_RESAMPLE_SAFETY` |  | `0.95` | factor applied to the reused step when N > 1 | `compressed_solver.py` |
 | `SWE_NO_SIGMA` |  | `1` | 1 (default) = the dense solver does not allocate the unused entropic-pressure array; 0 = allocate it. Bit-identical | `solver.py` |
-| `SWE_ALLOW_LIMITER_DRIFT` |  | `` | 1 = permit a limiter/kernel-template mismatch instead of failing loudly (never for production) | `rhs_cuda.py` |
-| `SWE_BED_GRAD_LIMITER` |  | `central` | bed-gradient limiter: central (default) or a limited form | `compressed_rhs.py` |
 | `SWE_CFL_ASYNC` |  | `1` | 1 (default) = non-blocking global dt reduction under MPI | `compressed_solver.py` |
 | `SWE_CFL_BLOCKRED` |  | `1` | 1 (default) = block-level CFL reduction kernel | `compressed_solver.py` |
-| `SWE_CFL_LINF` |  | `0` | 1 = L-infinity velocity norm max(|u|,|v|) in the CFL, as the dense solver uses (the benchmark configurations); default: the Euclidean norm (the applications) | `compressed_solver.py` |
 | `SWE_DENSE_FUSE_CFL` |  | `0` | 1 = reduce the next CFL inside the dense fused step (default 0) | `solver.py` |
 | `SWE_DENSE_FUSE_STEP` |  | `1` | 1 (default) = fused residual+update on the dense path | `solver.py` |
 | `SWE_DENSE_HALO_OVERLAP` |  | `1` | 1 (default) = overlap the dense halo exchange with interior compute (needs an inside mask) | `solver.py` |
-| `SWE_DENSE_MAXRREG` |  | `auto` | register cap for the dense residual kernel: auto (default) / integer / 0. NVIDIA only; ignored with a warning on AMD GPUs | `rhs_cuda.py` |
+| `SWE_DENSE_MAXRREG` |  | `auto` | register cap for the dense residual kernel: `auto` (default) / integer / 0. `auto` caps at 40 on sm_90 (H100), where it lifts occupancy to 75 % and is bit-identical, and leaves the cap off elsewhere, because on sm_120 (Blackwell) a cap of 40 was not bit-identical. NVIDIA only; ignored with a warning on AMD GPUs | `rhs_cuda.py` |
 | `SWE_DRY_SKIP` |  | unset | 1 = early-out for all-dry cells in the compressed residual (opt-in; not available together with the default `SWE_FLAT_FUSE_CFL=1`) | `compressed_rhs.py` |
 | `SWE_FLAT_BEDGRAD_PRECOMP` |  | `0` | 1 = precompute bed gradients (default 0: computed in-kernel) | `compressed_rhs.py` |
 | `SWE_FLAT_CFL_EARLY` |  | `0` | 1 = compute the CFL before the forcings stage when the fused CFL is off | `compressed_solver.py` |
@@ -159,7 +177,7 @@ Numerics-neutral: every switch is verified bit-identical on the benchmark cases,
 | `SWE_FLAT_FUSE_CFL` |  | `1` | 1 (default) = fold the next-step CFL reduction into the fused compressed step | `compressed_rhs.py` |
 | `SWE_FLAT_FUSE_CFL_CHECK` |  | `0` | 1 = verify the fused CFL against the separate kernel every step (debug; slow) | `compressed_solver.py` |
 | `SWE_FLAT_FUSE_STEP` |  | `1` | 1 (default) = fused residual+update on the compressed path | `compressed_rhs.py` |
-| `SWE_FLAT_MAXRREG` |  | `auto` | register cap for the compressed residual kernel: auto (default) / integer / 0. NVIDIA only; ignored with a warning on AMD GPUs | `compressed_solver.py` |
+| `SWE_FLAT_MAXRREG` |  | `auto` | register cap for the compressed residual kernel: `auto` (default) / integer / 0. Gated on the architecture like `SWE_DENSE_MAXRREG`: 40 on sm_90 only. NVIDIA only; ignored with a warning on AMD GPUs | `compressed_solver.py` |
 | `SWE_FLAT_REG2` |  | `1` | 1 (default) = regular-neighbour fast path | `compressed_rhs.py` |
 | `SWE_FLAT_REG2_SPLIT` |  | `1` | 1 (default) = split regular/irregular launches | `compressed_rhs.py` |
 | `SWE_FLAT_REGULAR_FASTPATH` |  | `0` | legacy name of the regular-neighbour path (default 0) | `compressed_rhs.py` |

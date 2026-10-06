@@ -85,6 +85,11 @@ First public release.
 - `set_manning_table` warns when friction is off. Unlike `set_manning` it does not switch
   friction on, so the run was silently frictionless with the roughness table the large runs
   rely on in hand.
+- Documentation: the performance-switch reference no longer claims that all 44 switches are
+  verified bit-identical. Seven of them change the computed trajectory and now have their own
+  section, and the rest name the checks that actually cover them. "dense", "flat-full" and
+  "flat-active", which carry the headline accuracy and speed numbers, are defined in one place
+  and used consistently.
 
 ## Compatibility promise for 1.x
 

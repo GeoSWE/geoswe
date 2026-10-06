@@ -124,10 +124,10 @@ partition-invariance check and a weak-scaling sweep. Measured there on one node
 (an MI250X card is two devices, so eight per node; 147 M cells per device,
 float32, host-staged halo):
 
-| Tier | 1 device | 8 devices | Weak efficiency |
+| Configuration | 1 device | 8 devices | Weak efficiency |
 |---|---|---|---|
-| Dense | 25.8 ms/step | 26.1 ms/step | 99.0 % |
-| Compressed | 23.7 ms/step | 23.9 ms/step | 99.2 % |
+| dense | 25.8 ms/step | 26.1 ms/step | 99.0 % |
+| flat-full | 23.7 ms/step | 23.9 ms/step | 99.2 % |
 
 Repeat launches differ by up to 2 %. The global solution is bit-identical on 1,
 2, 4 and 8 devices, with the host-staged and the GPU-aware halo, with and without
@@ -136,13 +136,16 @@ the halo/compute overlap.
 On two nodes, the scaling harness of `benchmark/scaling_640m` (640 M cells per
 device, in the configuration its launchers pin) gives:
 
-| Layout | Weak scaling, 16 devices, 10.24 B cells | Strong scaling, 16 devices |
+| Configuration | Weak scaling, 16 devices, 10.24 B cells | Strong scaling, 16 devices |
 |---|---|---|
-| Flat | 118.7 ms/step, 99.2 % efficiency | 15.0x |
-| Dense | 190.2 ms/step, 99.6 % efficiency | 15.4x |
+| flat-full | 118.7 ms/step, 99.2 % efficiency | 15.0x |
+| dense | 190.2 ms/step, 99.6 % efficiency | 15.4x |
 
-With the solver's defaults the same 10.24 billion cells take 102 ms/step (flat)
-and 112 ms/step (dense). The solution on sixteen devices across the two nodes has
+Both benchmarks keep every cell active, so they are the **flat-full** and **dense**
+configurations of [the three](compressed_mesh.md#three-configurations); the
+terrain-selected flat-active configuration is the production one. With the solver's
+defaults the same 10.24 billion cells take 102 ms/step (flat-full) and 112 ms/step
+(dense). The solution on sixteen devices across the two nodes has
 the digest of the one-device run.
 
 ```{note}

@@ -22,8 +22,10 @@ sixteen-slice nodes, which reaches twice the cell count.
   (96.8% efficiency) and **26.5×** at 32 Blackwell slices across two nodes
   (82.9%), tapering once each rank holds too few cells (the surface-to-volume
   trade-off).
-- The compressed path is 9 % faster per step than the dense path at constant
-  per-rank work, while producing bit-identical residuals on the same cells.
+- The **flat-full** configuration is 9 % faster per step than the **dense** one at
+  constant per-rank work, while producing bit-identical residuals on the same cells.
+  (These scaling runs keep every cell active, so they measure the layout, not the
+  active mask; see [the three configurations](compressed_mesh.md#three-configurations).)
 
 Do not difference the two hardware configurations against each other for a
 per-device ratio: they are separate machines with different interconnects and
@@ -46,7 +48,9 @@ lineage, and SERGHEI) on audited-identical inputs:
 - GeoSWE's flat-active configuration has the **lowest wall time and peak GPU
   memory of the tested configurations at every GPU count**: 3.5–3.9× faster per
   step, with 1.5–1.9× less per-rank memory, than the next-fastest comparison
-  code; GeoSWE dense is 1.6–1.7× faster than TRITON on the same cells. The four
+  code; GeoSWE dense is 1.6–1.7× faster than TRITON on the same cells. The
+  dense-to-flat-active speedup is not the storage layout alone: it also carries
+  kernel fusion, and flat-full is the configuration that isolates the layout. The four
   codes' scored standing-tide fields agree to pairwise CSI 0.989–0.994.
 - On the rain-driven (×10 rainfall) stress test, GeoSWE and SynxFlow complete
   the hour and agree closely (CSI 0.990 at 0.3 m, 1.5 cm RMSE); TRITON's fp32

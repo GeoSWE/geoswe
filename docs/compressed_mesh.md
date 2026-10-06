@@ -16,6 +16,23 @@ SciPy, which both come with the `gpu` extra. It is exposed as
 a CPU-only machine.
 ```
 
+## Three configurations
+
+The benchmarks and the paper compare three configurations of the same solver, and the
+names appear throughout the documentation:
+
+| name | what it is | what it isolates |
+|---|---|---|
+| **dense** | {py:class}`~geoswe.Solver2D` on the bounding box: every cell of the rectangle stored and updated | the conventional layout |
+| **flat-full** | the compressed solver with *every* cell active (an all-ones inside mask) | the flat storage layout alone, at compression ratio 1 |
+| **flat-active** | the compressed solver on the terrain-selected active set | the production configuration |
+
+"flat" and "compressed" are two names for the same code path, the one on this page;
+`CompressedSolver` is its class. Comparing dense with flat-full isolates the layout,
+and flat-full with flat-active isolates the active mask. Do not read the difference
+between dense and flat-active as the layout effect alone: it also carries kernel
+fusion, since the two paths fuse different amounts of work into one kernel.
+
 ## Using it
 
 Build the problem as a dense solver, mark the cells to keep, and convert:
