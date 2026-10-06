@@ -103,9 +103,10 @@ def build_parser(extra=None):
                          "has no effect on it (SWE_HMIN_CFL does).")
     ap.add_argument("--cache-save", default=None,
                     help="With --compressed: also save the flat structures to this dir, for a later "
-                         "replay with `python -m geoswe.runlib.replay --cache <dir>` (no dense "
-                         "domain built). This parser has no --cache: the driver always builds the "
-                         "dense domain, and the replay tool is the entry point that does not.")
+                         "replay that builds no dense domain. A runner calls "
+                         "geoswe.runlib.replay.main with the parser from its build_cached_parser, "
+                         "as benchmark/pinellas_3m/run_cache_3m.py does; this parser has no "
+                         "--cache, because the driver always builds the dense domain.")
     ap.add_argument("--balanced-partition", action="store_true",
                     help="With --compressed (MPI): active-cell-balanced 1xN y-split (florida-style "
                          "cumulative-active boundaries) instead of equal grid blocks. Balances MPI load "

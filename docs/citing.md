@@ -14,6 +14,13 @@ repository root (GitHub renders a "Cite this repository" button from it).
 }
 ```
 
+Cite the version you ran, not "the latest". Releases change what the solver computes:
+1.1.0 fixed two defects that produced plausible but wrong results in 1.0.0, so "GeoSWE"
+without a version does not identify what produced a number. Pin it in the environment
+that produced the results (`pip install geoswe==1.1.0`), put that version in the
+`version` field above, and link the matching documentation, which Read the Docs keeps
+per version at `https://geoswe.readthedocs.io/en/v1.1.0/`.
+
 A paper describing the method, the compressed active-cell mesh, the cross-code benchmark against TRITON, SynxFlow, and SERGHEI, and the county-to-continental applications is in preparation; this
 page will be updated with the article citation when it is available.
 

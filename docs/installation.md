@@ -6,6 +6,11 @@ suite runs on 3.10, 3.12 and 3.13, on Linux and on macOS.
 
 ## pip
 
+An unpinned install gives the newest release. For work whose numbers you intend to
+publish, pin the version you ran instead (`pip install geoswe==1.1.0`) and record it
+beside the results: releases change what the solver computes, and
+[citing](citing.md) explains what to put in the paper.
+
 ```bash
 # CPU only (NumPy backend): the solver and the examples
 pip install geoswe
