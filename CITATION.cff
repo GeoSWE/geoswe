@@ -14,6 +14,7 @@ authors:
     given-names: Peng
     email: pchen402@gatech.edu
     affiliation: "Georgia Institute of Technology"
+    orcid: "https://orcid.org/0000-0003-4215-9901"
 version: "1.1.1"
 date-released: "2026-10-06"
 doi: "10.5281/zenodo.23198244"          # concept DOI: always resolves to the newest version
