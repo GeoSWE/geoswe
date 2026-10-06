@@ -3,7 +3,8 @@
 Not a case from the paper: the environment, the job script and the results of
 running GeoSWE on AMD GPUs. Frontier's nodes carry four MI250X cards, which the
 system presents as eight devices (GCDs) with 64 GB each; one MPI rank drives one
-GCD. [`docs/amd_gpus.md`](../../docs/amd_gpus.md) describes what GeoSWE does
+GCD. Every timing below is per GCD, that is per half card.
+[`docs/amd_gpus.md`](../../docs/amd_gpus.md) describes what GeoSWE does
 differently on AMD hardware.
 
 | File | Purpose |
@@ -167,6 +168,16 @@ the configuration of the series in the paper:
 
 Reading these numbers:
 
+- A GCD is half an MI250X card, so these are not per-card times. For the same
+  640 M cells with the solver's defaults, the scaling figure in the repository
+  README has an H100 at about 42 ms/step (flat) and 46 ms/step (dense): 2.4 times
+  faster than one GCD (100.8 and 111.4 ms/step above). That is the ratio of their
+  FP32 lanes, 16,896 CUDA cores to 7,040 stream processors. Per lane the two run
+  at the same rate, 0.90 million (flat) and 0.82 million (dense) cells per second,
+  and a whole card delivers about 0.83 of an H100. On the MI250X the step is
+  compute-bound: it moves about 0.2 TB/s where a copy kernel measures 1.2 TB/s.
+  The two machines differ in more than the GPU, so this is arithmetic on
+  published numbers, not a controlled comparison.
 - The flat benchmark takes its wall time from the solver's log line, which has
   0.1 s resolution: 0.3 % of a weak-scaling window. That is why the flat means at
   8 and 16 GCDs coincide, and the flat efficiencies carry that uncertainty.
@@ -181,8 +192,7 @@ Reading these numbers:
   memory at the end of a run, of the 64 GiB of a GCD.
 - The first campaign in `scaling_640m/README.md` reports, for the same launchers
   at 16 H100 GPUs, 99.4 % and 99.0 % weak-scaling efficiency and 13.8x and 14.3x
-  strong-scaling speedup. The machines differ in more than the GPU, so this is
-  not a per-device comparison.
+  strong-scaling speedup.
 
 **Digests before timings.** The job's first stage runs `tests/mpi_bitcheck.py` on
 two ranks over halo overlap on / off and asynchronous `dt` on / off: the

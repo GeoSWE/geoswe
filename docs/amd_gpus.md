@@ -145,6 +145,17 @@ With the solver's defaults the same 10.24 billion cells take 102 ms/step (flat)
 and 112 ms/step (dense). The solution on sixteen devices across the two nodes has
 the digest of the one-device run.
 
+```{note}
+A device here is one GCD, half an MI250X card. For the same 640 M cells with the
+solver's defaults, the H100 of the scaling figure in the
+[repository README](https://github.com/GeoSWE/geoswe#how-it-scales) takes about
+42 ms/step (flat) and 46 ms/step (dense), where one GCD takes 101 and 111. That
+is 2.4 times faster, the ratio of their FP32 lanes (16,896 CUDA cores to 7,040
+stream processors), so a whole MI250X card delivers about 0.83 of an H100. The
+machines differ in more than the GPU: read this as arithmetic on published
+numbers, not as a controlled comparison.
+```
+
 ## Not done yet
 
 - Of the paper's benchmark cases, only the synthetic scaling harness has been run
