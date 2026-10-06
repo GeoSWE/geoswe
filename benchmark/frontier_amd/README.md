@@ -16,6 +16,7 @@ differently on AMD hardware.
 | `summarize_640m.py` | the tables of that job, from its CSV files |
 | `run_weak_1b.sbatch` | a power of two of nodes: weak scaling at one billion cells per GCD, from one GCD to all of them (128 nodes: 1.024 trillion cells) |
 | `node_check.py` | that job's pre-flight check of every node's GCDs |
+| `plot_weak_1b.py` | the figure of the billion-cell launches in the repository README; it holds their timings |
 
 ## Setting up
 
@@ -245,7 +246,9 @@ seconds per point, which is 253 steps at every size.
 - The single-GCD time is the least certain entry. Two launches on four nodes
   the evening before gave 156.92 and 157.31 ms/step on one GCD, and 158.89 on 8
   and on 16 GCDs both times. Against the mean of the three single-GCD times the
-  efficiency at 1024 GCDs is 96.7 %.
+  efficiency at 1024 GCDs is 96.7 %. The figure in the repository README
+  (`plot_weak_1b.py`) plots the means of the launches, as time per step divided
+  by that of the smallest size: 98.6 % at 8 and at 16 GCDs, 98.2 % at 32.
 - From one node to 128 the step time grows by 2.0 %, from 158.89 to 162.06 ms;
   the 8-GCD time was the same in all three launches. The job did not measure
   where that time goes.

@@ -55,6 +55,10 @@ Comparison codes as benchmarked: TRITON (commit `ec35bc4`), SERGHEI (commit `39a
 
 *Dense and flat storage layouts on an everywhere-wet synthetic domain, 640 million cells per GPU, 1 to 16 H100 GPUs across two nodes. Strong scaling reaches 15.5x on 16 GPUs for the flat layout; weak scaling stays above 99 %.*
 
+<p align="center"><img src="https://raw.githubusercontent.com/GeoSWE/geoswe/main/docs/images/scaling_frontier.png" alt="Weak scaling on OLCF Frontier at one billion cells per GPU: 1 to 32 GPUs, and 1 to 128 nodes with 1.024 trillion cells" width="900"></p>
+
+*The flat layout on AMD GPUs at OLCF Frontier, one billion cells per GPU (one GCD, half of an MI250X card; eight per node): time per step divided by that of the smallest size, so ideal weak scaling is the dashed line. On 128 nodes, 1.024 trillion cells advance at 162 ms per step: 98.0 % weak-scaling efficiency against one node and 96.7 % against one GPU. A marker is the mean of up to three launches, each timed over one 40-second window; see [`benchmark/frontier_amd`](https://github.com/GeoSWE/geoswe/blob/main/benchmark/frontier_amd/README.md).*
+
 ## What is inside
 
 - **Numerics:** HLLC and local Lax-Friedrichs fluxes; the Xia et al. (2017) surface-reconstruction method and Audusse hydrostatic reconstruction for exact lake-at-rest balance over arbitrary bathymetry; first-order, MUSCL, and fifth-order reconstruction; forward Euler and SSP-RK3.
