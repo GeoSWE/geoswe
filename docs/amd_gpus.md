@@ -133,9 +133,22 @@ Repeat launches differ by up to 2 %. The global solution is bit-identical on 1,
 2, 4 and 8 devices, with the host-staged and the GPU-aware halo, with and without
 the halo/compute overlap.
 
+On two nodes, the scaling harness of `benchmark/scaling_640m` (640 M cells per
+device, in the configuration its launchers pin) gives:
+
+| Layout | Weak scaling, 16 devices, 10.24 B cells | Strong scaling, 16 devices |
+|---|---|---|
+| Flat | 118.7 ms/step, 99.2 % efficiency | 15.0x |
+| Dense | 190.2 ms/step, 99.6 % efficiency | 15.4x |
+
+With the solver's defaults the same 10.24 billion cells take 102 ms/step (flat)
+and 112 ms/step (dense). The solution on sixteen devices across the two nodes has
+the digest of the one-device run.
+
 ## Not done yet
 
-- The paper's benchmark cases have not been run on AMD hardware.
+- Of the paper's benchmark cases, only the synthetic scaling harness has been run
+  on AMD hardware.
 - The register cap that speeds up the residual kernel on H100 has no ROCm
   counterpart, and no AMD-specific tuning of block sizes has been tried.
-- Only one node was used; runs across nodes are untested.
+- Two nodes (16 devices) are the most that has been used.

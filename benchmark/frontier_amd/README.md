@@ -11,6 +11,8 @@ differently on AMD hardware.
 | `env.sh` | modules, virtual environment and cache locations; source it on a login node and in every job |
 | `run_validation.sbatch` | one node: GPU test suite, partition-invariance check, weak scaling of both tiers |
 | `partition_check.py` | one md5 of the global solution, for any rank count and halo configuration |
+| `run_scaling_640m.sbatch` | two nodes: the [`scaling_640m`](../scaling_640m/) harness at 640 M cells per rank, N = 1 to 16 |
+| `summarize_640m.py` | the tables of that job, from its CSV files |
 
 ## Setting up
 
@@ -52,14 +54,25 @@ The job takes about 15 minutes. Its exit status is non-zero if a test fails, a
 launch fails, or the digests of the partition check disagree. Logs and CSV files
 go to `$GEOSWE_SCRATCH/runs/<job name>-<job id>/`.
 
-## Results
+```bash
+sbatch -A <project> -p batch -q debug benchmark/frontier_amd/run_scaling_640m.sbatch
+python benchmark/frontier_amd/summarize_640m.py $GEOSWE_SCRATCH/runs/geoswe-640m-<job id>
+```
 
-2026-10-05, one node, ROCm 7.2.0, Cray MPICH 9.1.0, `mpi4py` 4.1.2, float32.
+The two-node job takes about 45 minutes with three timed windows per point
+(`REPEATS`); `STAGES` selects among `check`, `weak`, `strong` and `defaults`.
 
-**GPU test suite.** All 18 tests pass on the login nodes' MI210, with `amd-cupy`
-13.5.1 and with `cupy-rocm-7-0` 14.2.0 (the latter also against ROCm 7.0.2). On
-an MI250X GCD the job ran the 17 tests that existed at the time, with both builds,
-and all passed; `test_every_kernel_source_compiles` was added afterwards.
+## Results on one node
+
+2026-10-05, ROCm 7.2.0, Cray MPICH 9.1.0, `mpi4py` 4.1.2, float32. The validation
+job ran on the tree before the 1.0.0 release merge; the test suite was repeated
+on the merged tree.
+
+**GPU test suite.** All 19 GPU tests (121 tests in total) pass on the login
+nodes' MI210, with `amd-cupy` 13.5.1 and with `cupy-rocm-7-0` 14.2.0; the latter
+was also run against ROCm 7.0.2 before the merge. On an MI250X GCD the validation
+job ran the 17 GPU tests that existed at the time, with both builds, and all
+passed.
 
 **Partition invariance.** `partition_check.py` runs the `tests/mpi_bitcheck.py`
 problem (1024 x 2048 cells; 103 steps on the compressed tier, 100 on the dense
@@ -113,3 +126,66 @@ default settings, which differ from the configuration pinned for the paper's
 scaling figure (`../scaling_640m/README.md`), so these numbers are not comparable
 with the H100 ones there. The strong-scaling and contraction measurements were
 separate launches of the same two scripts, not stages of `run_validation.sbatch`.
+
+## Results on two nodes: the 640 M harness
+
+2026-10-05, merged tree, `amd-cupy` 13.5.1. `run_scaling_640m.sbatch` runs the two
+benchmarks of [`scaling_640m`](../scaling_640m/) in the configuration its repeat
+launchers pin: step forcings not fused, the time step resampled every fifth step,
+host-staged halo overlapped with the interior, the flat layout built with
+`--direct`. Each rank holds a 20000 x 32000 strip in weak scaling; strong scaling
+splits one such grid. Up to 8 ranks share a node, 16 take both. Every point is
+the mean of three timed windows, whose standard deviation is at most 0.3 ms.
+
+**Weak scaling, 640 M cells per rank**
+
+| GCDs | Cells | Flat | Efficiency | Dense | Efficiency |
+|---|---|---|---|---|---|
+| 1 | 0.64 B | 117.76 ms/step | | 189.47 ms/step | |
+| 2 | 1.28 B | 118.54 | 99.3 % | 189.69 | 99.9 % |
+| 4 | 2.56 B | 118.80 | 99.1 % | 189.90 | 99.8 % |
+| 8 | 5.12 B | 118.67 | 99.2 % | 190.22 | 99.6 % |
+| 16, two nodes | 10.24 B | 118.67 | 99.2 % | 190.25 | 99.6 % |
+
+**Strong scaling, 640 M cells in total**
+
+| GCDs | Cells per rank | Flat | Speedup | Dense | Speedup |
+|---|---|---|---|---|---|
+| 1 | 640 M | 117.76 ms/step | | 189.47 ms/step | |
+| 2 | 320 M | 59.61 | 1.98x | 94.16 | 2.01x |
+| 4 | 160 M | 30.01 | 3.92x | 47.55 | 3.99x |
+| 8 | 80 M | 15.19 | 7.75x | 24.18 | 7.84x |
+| 16, two nodes | 40 M | 7.87 | 14.97x (93.6 %) | 12.31 | 15.39x (96.2 %) |
+
+**Weak scaling with the solver's defaults** (fused step, a reduction every step),
+the configuration of the series in the paper:
+
+| Layout | 1 GCD | 16 GCDs, 10.24 B cells | Efficiency |
+|---|---|---|---|
+| Flat | 100.83 ms/step | 102.06 | 98.8 % |
+| Dense | 111.40 | 112.43 | 99.1 % |
+
+Reading these numbers:
+
+- The flat benchmark takes its wall time from the solver's log line, which has
+  0.1 s resolution: 0.3 % of a weak-scaling window. That is why the flat means at
+  8 and 16 GCDs coincide, and the flat efficiencies carry that uncertainty.
+- Three things differ from the launchers in `scaling_640m`: three windows per
+  point instead of five; strong-scaling windows that grow with the rank count,
+  to keep that resolution; and the one-node points measured on the two nodes at
+  the same time, each launch alone on its node.
+- Not fusing the step forcings costs the dense layout far more than the flat one
+  here (189 against 118 ms/step); with the defaults the dense layout is 10 %
+  slower than the flat one (111 against 101 ms/step).
+- At 640 M cells a rank holds 20.9 GiB (flat) or 23.9 GiB (dense) of device
+  memory at the end of a run, of the 64 GiB of a GCD.
+- The first campaign in `scaling_640m/README.md` reports, for the same launchers
+  at 16 H100 GPUs, 99.4 % and 99.0 % weak-scaling efficiency and 13.8x and 14.3x
+  strong-scaling speedup. The machines differ in more than the GPU, so this is
+  not a per-device comparison.
+
+**Digests before timings.** The job's first stage runs `tests/mpi_bitcheck.py` on
+two ranks over halo overlap on / off and asynchronous `dt` on / off: the
+owned-cell digests agree. `partition_check.py` then gives the same digest on one
+rank and on sixteen ranks across the two nodes, for both layouts, with the
+host-staged and with the GPU-aware halo.
