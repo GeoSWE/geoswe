@@ -189,7 +189,7 @@ _CFL_LAMMAX_FLAT_NS_SRC = _CFL_LAMMAX_FLAT_SRC.replace(
     "float lam = (sqrtf(u*u + v*v) + c) * inv_sig[k];",
     "float lam = (sqrtf(u*u + v*v) + c);")
 
-# BLOCK-REDUCED CFL variant (DEFAULT since 2026-08-18; SWE_CFL_BLOCKRED=0
+# BLOCK-REDUCED CFL variant (the default; SWE_CFL_BLOCKRED=0
 # restores the per-thread kernel for debugging): grid-stride loop +
 # shared-memory block max + ONE atomicMax per block instead of one per wet
 # thread. Same-address atomics serialize at the L2; benchmark legs gain
@@ -515,17 +515,17 @@ def _build_ring_bc(nbr, is_active, bed_f, N, eta, mode, say=None, rank=0):
     if mode not in ("auto", "stage", "extrapolate", "hybrid", "stage_uv"):
         raise ValueError(
             f"GEOSWE_RING_BC={mode!r}: expected auto|stage|extrapolate|hybrid|stage_uv|off")
-    # research-tree spelling of the same thing
+    # an older spelling of the same thing
     if os.environ.get("SWE_GHOST_UV") in ("1", "true", "True") and mode in ("auto", "stage"):
         mode = "stage_uv"
 
-    # These exist in the research tree but the release step loop cannot honour them
-    # (it applies a constant stage and zero momentum). Fail loudly rather than
-    # silently running a different boundary condition than the recipe asked for.
+    # This step loop cannot honour these: it applies a constant stage and zero momentum.
+    # Fail loudly rather than silently running a different boundary condition than the
+    # recipe asked for.
     if os.environ.get("SWE_GHOST_ETA_RAMP_MMHR"):
         raise NotImplementedError(
             "SWE_GHOST_ETA_RAMP_MMHR is set but this solver applies a CONSTANT ring "
-            "stage. Drop the variable or use the research tree.")
+            "stage, so the ramp would be ignored. Unset the variable.")
 
     if mode == "extrapolate":
         gi, gn = _build_ghost_bc(nbr, is_active, N)
@@ -584,7 +584,7 @@ class CompressedStepper:
             raise TypeError(f"CompressedStepper: nbr must be int16 deltas, got {nbr.dtype}")
         if getattr(is_active, "dtype", None) is not None and is_active.dtype != np.uint8:
             raise TypeError(f"CompressedStepper: is_active must be uint8, got {is_active.dtype}")
-        if use_quad is None:  # default quadratic since 2026-08-07 (GEOSWE_FRICTION_QUAD=0 restores linearized)
+        if use_quad is None:  # quadratic by default (GEOSWE_FRICTION_QUAD=0 restores the linearized root)
             use_quad = (os.environ.get('GEOSWE_FRICTION_QUAD', os.environ.get('SWE_FRICTION_QUAD', '1')) != '0')
         self.N = int(N); self.nbr = nbr; self.is_active = is_active
         self.region = None   # uint8 (N,): 1=MPI-boundary cell; set for halo-overlap
@@ -1581,7 +1581,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
         stage_all_dev = cp.asarray(np.ascontiguousarray(stage_all, dtype=np.float32))
     sponge_on = sponge is not None
     if sponge_on:
-        if sponge.get("band_idx") is not None:           # OPT-D: cache already stores the edge band (no full arrays)
+        if sponge.get("band_idx") is not None:           # the cache already stores the edge band (no full arrays)
             sp_idx = sponge["band_idx"].astype(cp.int32); sp_keep = sponge["band_keep"]; sp_amb = sponge["band_amb"]
             sp_n = int(sp_idx.size)
         else:
@@ -1973,7 +1973,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
     _dbg_dt = int(os.environ.get("SWE_DEBUG_DT", "0"))   # SWE_DEBUG_DT=N: trace global dt every N steps (diag; off=0)
     # SWE_FUSE_FORCINGS=1: rain+axpy+friction+max in ONE kernel (default off; validated
     # bit-identical on the Pinellas-3m bench before enabling anywhere else)
-    _fuse_forcings = os.environ.get("SWE_FUSE_FORCINGS", "1") == "1"   # default ON since 2026-08 (quad default; fused==split verified bitwise)
+    _fuse_forcings = os.environ.get("SWE_FUSE_FORCINGS", "1") == "1"   # on by default (fused == split, verified bitwise)
     _vcap_count = (os.environ.get("GEOSWE_VCAP_COUNT", os.environ.get("SWE_VCAP_COUNT", "0")) == "1")
     _vcap_hits = 0; _vcap_steps = 0; _vcap_maxstep = 0
     _hcap = float(os.environ.get("SWE_H_CAP", "0"))      # SWE_H_CAP>0: cap depth h<=cap each step. Bounds a
@@ -2621,7 +2621,7 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
     nbr = cp.asarray(_nbr_host); del _nbr_host                    # GPU gets ONLY the int16 table (3.55 GB)
     is_active = ld("is_active")
     ij_active = np.load(os.path.join(cache_dir, "ij_active.npy"))  # HOST: only save_frame + interior-mask read it
-    # OPT-A: on a real resume the checkpoint overwrites q0/q1/q2 in _step_loop -> the cache IC is read then
+    # on a real resume the checkpoint overwrites q0/q1/q2 in _step_loop -> the cache IC is read then
     # discarded. Allocate uninitialized device arrays and skip the 3xN-float32 cache read (-21 GB at 4x scale).
     _N0 = int(nbr.shape[0])
     _will_resume = bool(resume) and ckpt_dir is not None and os.path.exists(os.path.join(ckpt_dir, "ckpt_meta.json"))
@@ -2653,7 +2653,7 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
             _s = ld("sig_f"); no_sigma = not bool(_s.any()); del _s
             cp.get_default_memory_pool().free_all_blocks()
         else:
-            no_sigma = True                    # OPT-B: trimmed cache (sig_f/inv_sig_f deleted) => Σ≡0
+            no_sigma = True                    # trimmed cache (sig_f/inv_sig_f deleted) => Σ≡0
     if no_sigma:                               # Σ==0 -> never materialize sig_f/inv_sig_f (-2 x N float32)
         sig_f = inv_sig_f = None
     else:
@@ -2716,14 +2716,14 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
                 f"{_stg_cap} m -- wrong vertical datum in a cached gauge table? "
                 f"(set GEOSWE_MAX_STAGE_M to override)")
     if meta.get("has_sponge"):
-        if os.path.exists(os.path.join(cache_dir, "sponge_band_idx.npy")):   # OPT-D: edge band pre-extracted (tiny)
+        if os.path.exists(os.path.join(cache_dir, "sponge_band_idx.npy")):   # edge band pre-extracted (tiny)
             sponge = dict(band_idx=ld("sponge_band_idx"),
                           band_keep=ld("sponge_band_keep"), band_amb=ld("sponge_band_amb"))
         else:                                                                 # old cache: full (N,) arrays, trim at runtime
             sponge = dict(keep_f=ld("sponge_keep_f"), amb_f=ld("sponge_amb_f"))
     if meta.get("has_rain"):
         _lk_npz = os.path.join(cache_dir, "rain_lookup_flat.npz")
-        if os.path.exists(_lk_npz):                                # OPT-C: zlib-compressed (~119x); decompress on host
+        if os.path.exists(_lk_npz):                                # zlib-compressed (~119x); decompress on host
             _lk = np.load(_lk_npz)["x"]
         else:
             _lk = np.load(os.path.join(cache_dir, "rain_lookup_flat.npy"))   # old cache: raw int32/int64

@@ -310,7 +310,7 @@ void friction_wd(
 # ============================================================
 # SWE_FUSE_FORCINGS=1 (dense path): axpy + friction/wet-dry + running-max in ONE
 # launch, replacing three kernels and two extra full passes over the state. The
-# compressed tier has carried this since 2026-06; this is the dense counterpart,
+# compressed tier has carried this for longer; this is the dense counterpart,
 # so both storage tiers can be benchmarked at a matched forcing configuration.
 # Semantics are preserved exactly: the axpy and the running max run over the FULL
 # padded grid (as the ElementwiseKernel and np.maximum they replace do), while
@@ -329,7 +329,7 @@ def _say(msg):
 
 def _dense_fuse_forcings():
     # SWE_FUSE_FORCINGS=1 enables the dense fused forcings path (default off).
-    return os.environ.get("SWE_FUSE_FORCINGS", "1") == "1"   # default ON since 2026-08 (quad default; fused==split verified bitwise)
+    return os.environ.get("SWE_FUSE_FORCINGS", "1") == "1"   # on by default (fused == split, verified bitwise)
 
 
 def _dense_fuse_storage():
@@ -423,8 +423,8 @@ void fused_forcings_dense(
 # being deleted, which is what lets depression pooling survive a raised floor.
 # A/B against the older delete-below-floor behaviour on Milton x10: identical
 # step counts, volume +0.0004%, CSI 1.0000 at 0.3 m, cost +0.6%.
-# SWE_WETDRY_ZERO_H=1 restores delete-below-floor for strict reproduction of
-# pre-2026-08 runs.
+# SWE_WETDRY_ZERO_H=1 restores delete-below-floor, the behaviour before the floor
+# began keeping the sub-floor depth.
 _WETDRY_KEEP_H = "0" if os.environ.get("SWE_WETDRY_ZERO_H") == "1" else "1"
 _FRICTION_KERNEL_SRC = _FRICTION_KERNEL_SRC.replace("__WETDRY_KEEP_H__", _WETDRY_KEEP_H)
 _FUSED_FORCINGS_DENSE_SRC = _FUSED_FORCINGS_DENSE_SRC.replace("__WETDRY_KEEP_H__", _WETDRY_KEEP_H)
@@ -712,7 +712,7 @@ class Config:
     friction_velocity_cap_ms: float = 15.0
     # If True, use the closed-form quadratic-alpha friction root instead of the
     # linearized 1/(1+dt Cf |U|).
-    # DEFAULT since 2026-08-07: quadratic-α (kinematic-plane arbiter: quadratic
+    # DEFAULT: quadratic-α (kinematic-plane arbiter: quadratic
     # +1.5% of the analytic film profile, linearized +7-9% thick; +0.5-0.7% steps).
     # GEOSWE_FRICTION_QUAD=0 / SWE_FRICTION_QUAD=0 restores the linearized root.
     friction_quadratic_alpha: bool = True
@@ -785,7 +785,7 @@ class Config:
         #     the floor is INERT: bit-identical fields and step counts on the peak
         #     eta=2.322 x10, Milton x10 (18,813) and flat-active (16,051) stress
         #     cases. Pass h_min_cfl explicitly (e.g. 1e-3) to reproduce the
-        #     pre-flip floored configuration.
+        #     floored configuration (h_min_cfl = 1e-3).
         # Cases that pin h_min EXPLICITLY are unaffected (block needs h_min==H_MIN):
         # Pinellas/florida pin 1e-6, Cook pins 1e-3 -> validated composites
         # (Helene 0.821, Milton 0.580, Cook 0.948) byte-identical.
@@ -799,10 +799,10 @@ class Config:
         if self.dtype == "float32" and self.h_min == H_MIN:
             self.h_min = 1.0e-6
             if self.h_min_cfl == 0.0:
-                # SIMPLIFIED DEFAULT 2026-08-07: couple the CFL floor to the physics
+                # SIMPLIFIED DEFAULT: couple the CFL floor to the physics
                 # floor (raw divisor). Inert under the quadratic-alpha friction
                 # default; bit-identical on the peak/Milton/flat stress cases.
-                # Pass h_min_cfl=1e-3 explicitly for the pre-flip floored config.
+                # Pass h_min_cfl=1e-3 explicitly for the floored configuration.
                 self.h_min_cfl = self.h_min
         # validate enum config so a typo fails loudly here, not as a silent
         # fall-through (unknown rk_storage -> high_storage; recon/flux typo -> late error).
@@ -1407,7 +1407,7 @@ class Solver2D:
         self._pad_bed()
         self.diagnostics = {"rhs_calls": 0, "wallclock": 0.0}
 
-        # OPT G/J: optional per-cell active-region mask. Cells where
+        # optional per-cell active-region mask. Cells where
         # inside_mask=False get rhs=0 (their values stay at whatever IC was
         # set, typically ambient). Set via ``set_inside_mask``.
         # NOTE the CFL reduction does NOT honor this mask -- only the
@@ -1422,7 +1422,7 @@ class Solver2D:
         # (1 B/cell vs 4). Default None → friction uses cfg.manning_field as before.
         self._manning_cls = None
         self._manning_tab = None
-        # OPT I: percentile-based robust max wave speed (None = use plain max).
+        # percentile-based robust max wave speed (None = use plain max).
         # Set to e.g. 99.99 to drop the top 0.01% of cells from the dt limit
         # (helps when 1-2 wet/dry hot pixels dominate dt unnecessarily).
         # Single-rank only: the percentile is per rank, so cfl_dt refuses it under MPI.
@@ -2427,7 +2427,7 @@ class Solver2D:
                 _recon = "wb_srm" if cfg.wb_method == "srm" else "wb_audusse"
             else:
                 _recon = cfg.recon
-            # OPT G: pass per-cell active mask if set; else None -> kernel
+            # pass per-cell active mask if set; else None -> kernel
             # behaves as before (uses cached all-ones mask).
             _kw = dict(g=cfg.g, h_min=cfg.h_min, out=self._rhs_buf, recon=_recon,
                        inside_mask=self.inside_mask, flux=cfg.flux,

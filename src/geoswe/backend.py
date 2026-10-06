@@ -91,7 +91,7 @@ def _no_device(cp):
 def _select_default():
     global _xp_module, USING_CUPY, GPU_PLATFORM
     # GEOSWE_BACKEND is the documented name. SWELL_BACKEND and SWE_IGR_BACKEND are the
-    # research tree's names, kept so that both trees respond to the same job scripts.
+    # names this code used before it was GeoSWE, kept so existing job scripts keep working.
     # First one set wins; with none set the GPU is used when it is there.
     asked = (os.environ.get("GEOSWE_BACKEND")
              or os.environ.get("SWELL_BACKEND")
