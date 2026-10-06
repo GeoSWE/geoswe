@@ -1,13 +1,24 @@
 name: docs
 
-# The same Sphinx build Read the Docs runs, as a CI gate: -W turns every warning
-# (a broken reference, a malformed table, an autodoc import failure) into a failure,
-# so a pull request cannot merge documentation that would then break the published
-# site. Publishing itself is Read the Docs' job, from .readthedocs.yaml, which is
-# why this workflow uploads nothing and creates no deployment.
+# Two jobs, because the documentation has two homes.
+#
+# `build` is the gate: the same Sphinx build Read the Docs runs, with -W turning every
+# warning (a broken reference, a malformed table, an autodoc import failure) into a failure,
+# so a pull request cannot merge documentation that would break the published site.
+#
+# `deploy` keeps https://geoswe.github.io/geoswe current. Read the Docs is canonical
+# (docs/conf.py sets html_baseurl, so this copy's canonical links point there, and only
+# Read the Docs carries the per-version URLs), but the GitHub Pages address has been shared
+# publicly, so it must not serve the documentation of an older release.
+#
+# paths-ignore: a push that cannot change the built site records no deployment.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'benchmark/**'
+      - 'tests/**'
+      - 'CHANGELOG.md'
   pull_request:
 
 permissions:
@@ -23,3 +34,20 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[docs]"
       - run: python -m sphinx -b html -W --keep-going docs docs/_build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
