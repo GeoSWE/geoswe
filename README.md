@@ -153,10 +153,11 @@ applications is in preparation.
 This material is based upon work supported by the National Science Foundation
 under Grant No. 2325631, by a 2025 IDEaS + Cloud Hub award with support from
 Microsoft at the Georgia Institute of Technology, and by the U.S. Department of
-Energy under Contract No. DE-AC05-00OR22725 in collaboration with Oak Ridge
-National Laboratory. Computing resources were provided in part by the
-Partnership for an Advanced Computing Environment (PACE) at Georgia Tech and by
-the Frontier supercomputer at the Oak Ridge Leadership Computing Facility.
+Energy under Contract No. DE-AC05-00OR22725 through the Genesis Mission project,
+in collaboration with Oak Ridge National Laboratory, the Tennessee Valley
+Authority, and AMD. Computing resources were provided in part by the Partnership
+for an Advanced Computing Environment (PACE) at Georgia Tech and by the Frontier
+supercomputer at the Oak Ridge Leadership Computing Facility.
 
 ## License
 
