@@ -15,10 +15,15 @@ partition gives each rank an equal strip. One step is the full production cost
 
 Requires CuPy and mpi4py (`pip install "geoswe[gpu,mpi]"`). One GPU/rank.
 """
-import os, time, argparse
+import os, sys, time, argparse
 import numpy as np
-from mpi4py import MPI
-import cupy as cp
+try:
+    from mpi4py import MPI
+    import cupy as cp
+except ImportError:
+    sys.exit('This example needs a GPU and MPI: install them with `pip install "geoswe[gpu,mpi]"` on\n'
+             'NVIDIA or `pip install "geoswe[gpu-rocm,mpi]"` on AMD, and launch it under mpirun.\n'
+             'Examples 1 to 4 and 7 run on the CPU.')
 
 from geoswe import Mesh2D, Solver2D, Config
 

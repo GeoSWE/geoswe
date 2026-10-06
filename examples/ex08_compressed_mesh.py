@@ -14,9 +14,13 @@ and how closely the two depth fields agree inside the study area.
 
     python examples/ex08_compressed_mesh.py        # needs `pip install "geoswe[gpu]"`
 """
-import os, time
+import os, sys, time
 import numpy as np
-import cupy as cp
+try:
+    import cupy as cp
+except ImportError:
+    sys.exit('This example needs a GPU: install CuPy with `pip install "geoswe[gpu]"` on NVIDIA or\n'
+             '`pip install "geoswe[gpu-rocm]"` on AMD. Examples 1 to 4 and 7 run on the CPU.')
 from geoswe import Mesh2D, Config, Solver2D, RainfallForcing, CompressedSolver
 
 HERE = os.path.dirname(__file__)
