@@ -105,6 +105,28 @@ def probe_cuda_aware(comm):
     return requested
 
 
+def _check_face_extent(side, nbr, mine, theirs):
+    """Raise when a neighbour does not size this face the way this rank does.
+
+    ``mine`` and ``theirs`` are each ``(nxp, nyp, ngh)``. Only the extent ALONG the face
+    has to agree, because that is the one in the buffer shape: an x-face buffer is
+    ``(ngh, nyp)`` and a y-face buffer is ``(nxp, ngh)``. So x-neighbours must agree on
+    ``nyp`` and y-neighbours on ``nxp``, and an uneven split along the decomposition axis
+    itself stays legal, which the run driver's layouts depend on. Separate from the
+    exchange so the message can be checked without a second rank.
+    """
+    (mine_nxp, mine_nyp, mine_ngh), (their_nxp, their_nyp, their_ngh) = mine, theirs
+    what, m, t = (("nyp", mine_nyp, their_nyp) if side.startswith("x")
+                  else ("nxp", mine_nxp, their_nxp))
+    if t != m or their_ngh != mine_ngh:
+        raise RuntimeError(
+            f"halo face {side}: rank {nbr} sizes this face differently -- local "
+            f"({what}={m}, ngh={mine_ngh}), neighbour ({what}={t}, ngh={their_ngh}). The two "
+            f"ranks would pack and unpack different face sizes. Give the two ranks the same "
+            f"{what} and ngh; only the extent along a shared face has to match, so an uneven "
+            f"split along the decomposition axis is fine.")
+
+
 class Halo2D:
     """Persistent 2-D halo exchanger for arrays of shape ``(*, nxp, nyp)``.
 
@@ -180,6 +202,39 @@ class Halo2D:
             self._mpi_t = MPI.FLOAT
         else:
             raise ValueError(f"unsupported dtype {dtype}")
+
+        # Last, after every local check: the face extents come from THIS rank's padding
+        # alone (see _get_bufs), with nothing asking the neighbour.
+        self._negotiate_face_extent()
+
+    # ------------------------------------------------------------------
+    def _negotiate_face_extent(self):
+        """Check with each neighbour that the two ranks size this face the same way.
+
+        Without it the first mismatch surfaces out of the bed exchange at the end of
+        ``Solver2D.__init__`` as ``MPI_ERR_TRUNCATE`` on whichever side has the smaller
+        receive buffer, naming no rank and no extent (the other side keeps a ghost strip
+        whose tail the partial message never wrote). This buys the message, not safety.
+
+        Every face sends the same payload, this rank's ``(nxp, nyp, ngh)``, so two faces
+        that share a neighbour (a periodic axis, or the self-neighbours of a size-1 run)
+        cannot cross-pair into a false mismatch and no tags are needed. The non-periodic
+        Cart gives each face a distinct neighbour anyway, as ``CompressedHalo.check_alignment``
+        relies on.
+
+        Every face is exchanged before anything is raised, for that sibling's reason:
+        raising inside the loop skips this rank's remaining ``sendrecv`` calls, and the
+        neighbour waiting on one of them then blocks here, inside the check, until the
+        job's wall clock runs out. Both ranks of a mismatching pair compare the same
+        extent, so both raise; a third rank is left in the next collective, which is
+        where ``runlib._abort_all_ranks`` takes the job down.
+        """
+        mine = (self.nxp, self.nyp, self.ngh)
+        faces = [(side, self._neighbor(side)) for side in ("x-", "x+", "y-", "y+")]
+        faces = [(side, nbr) for side, nbr in faces if nbr != MPI.PROC_NULL]
+        theirs = [self.cart.sendrecv(mine, dest=nbr, source=nbr) for _, nbr in faces]
+        for (side, nbr), t in zip(faces, theirs):
+            _check_face_extent(side, nbr, mine, t)
 
     # ------------------------------------------------------------------
     def has_neighbor(self, side: str) -> bool:

@@ -527,6 +527,40 @@ def _ensure_friction_kernel():
         _FRICTION_KERNEL_FP32 = raw_kernel(_FRICTION_KERNEL_SRC, "friction_wd")
 
 
+def check_manning_table(cls_padded, table, padded_shape, who="set_manning_table"):
+    """Validate a Manning class array and its table against the fused friction kernel.
+
+    The kernel declares ``(const unsigned char*, const float*)`` and checks nothing: a
+    wrong dtype is byte-reinterpreted into plausible but wrong roughness, an
+    interior-shaped array is read with the padded stride and so scrambles roughness in a
+    way that depends on the MPI partition, and a class id past the end of the table is an
+    out-of-bounds device read. Returns the pair as arrays, the table cast to float32.
+
+    ``Solver2D.set_manning_table`` and ``CompressedSolver.from_dense`` both call this, the
+    second because a caller may hand it ``m_cls_xp``/``m_tab_xp`` directly and reach the
+    same kernel without passing through the solver.
+    """
+    cls_padded = np.asarray(cls_padded)
+    table = np.asarray(table, dtype=np.float32)
+    if tuple(cls_padded.shape) != tuple(padded_shape):
+        raise ValueError(
+            f"{who} expects a PADDED (nxp, nyp)={tuple(padded_shape)} class array "
+            f"(ghost cells included); got {tuple(cls_padded.shape)}. Build it "
+            f"as np.full((nx+2*ngh, ny+2*ngh), ...) with the interior filled, "
+            f"not inv.reshape(nx, ny)[i0:i1, j0:j1].")
+    if cls_padded.dtype != np.uint8:
+        raise ValueError(f"{who}: cls_padded must be uint8 "
+                         f"(kernel reads unsigned char*); got {cls_padded.dtype}. "
+                         f"Cast it with .astype(np.uint8).")
+    if not (getattr(cls_padded, "flags", None) is None or cls_padded.flags.c_contiguous):
+        raise ValueError(f"{who}: cls_padded must be C-contiguous")
+    if int(cls_padded.max()) >= int(table.size):
+        raise ValueError(
+            f"{who}: class id {int(cls_padded.max())} out of range "
+            f"for a {int(table.size)}-entry table (OOB device read)")
+    return cls_padded, table
+
+
 def _check_numeric_inputs(where="Config", **vals):
     """Bound the numeric inputs an entry point takes as plain floats.
 
@@ -827,6 +861,85 @@ class Config:
 
 
 # ---------------------------------------------------------------------------
+# What the solvers check before they run
+# ---------------------------------------------------------------------------
+
+# Reconstruction stencil radius: how many ghost cells the recon READS.
+_RECON_RADIUS = {
+    "first":   1, "linear2": 1, "linear3": 1, "muscl":   1,
+    "linear5": 3, "weno5":   3,
+}
+
+# Ghost layers each solver needs, keyed by dimension. The radius above is only half the
+# answer, so these are the minima of what will actually RUN:
+#
+#   2D: keyed by the fused kernel family Solver2D._rhs dispatches to (rhs_cuda's own
+#       registry names). Every fused kernel guards on a fixed halo of its own, wider than
+#       the stencil for the LF family (`i < 3` for every recon including 'first'), and a
+#       cell outside the guard is never written, so water arriving at a 'fall' boundary
+#       freezes with no error. Each entry is the smallest ngh at which the outer interior
+#       ring of a 24x24 L40S run still moves over 20 steps (by 0.59 to 0.60 m); for 'lf',
+#       'wb_srm' and 'wb_srm_hllc' one layer less moved it by exactly 0. max()ed with
+#       _RECON_RADIUS, which is all the NumPy _rhs needs (at ngh=1 it is bit-identical to
+#       ngh=4), so the kernel bound must stay gated on a fused dispatch actually running.
+#   1D: keyed by the branch Solver1D._rhs takes. The bound is the asymmetric WRITE window,
+#       measured, not a stencil radius: linear5/weno5 write [3, n-5], whose upper end needs
+#       ngh >= 4 while its lower end needs 3. Only the flux divergence is confined to the
+#       window, so on a slope the cells outside it are not inert but unbalanced: at ngh=3
+#       with linear5 on a 1:20 bed, 10 steps left the last interior cell at |dh| = 0 with
+#       its momentum moved 4.9e-2 by the bed-slope source, which rhs[1] adds everywhere
+#       (ngh=4, same run: |dh| = 2.7e-3). well_balanced replaces the reconstruction with
+#       first-order face states, so its window is the 'first' one whatever recon says: a
+#       WB run at ngh=1 is bit-identical to the same run at ngh=4, and charging it the
+#       recon's 4 would refuse a correct run, which is why the 1D key is the branch and
+#       not the recon. Every entry is >= 1, which also refuses ngh=0, where _pad_bed's
+#       `self.b[-ngh:] = self.b[-ngh-1]` reads as `self.b[0:] = self.b[-1]` and flattens
+#       the whole bed ([0..7] came out all 7).
+# Config's recon enum and the 1D keys must stay in sync: a recon added there without an
+# entry here raises a KeyError rather than defaulting to a halo that is too small.
+_MIN_NGH = {
+    1: {"wb": 1, "first": 1, "linear2": 2, "linear3": 2, "muscl": 2, "linear5": 4, "weno5": 4},
+    2: {"lf": 3, "wb_audusse": 1, "wb_srm": 2, "first_hllc": 1, "wb_srm_hllc": 2},
+}
+
+
+def _fused_kernel_family_2d(cfg):
+    """The fused 2D RHS kernel this config dispatches to, or None for the Python path.
+
+    Mirrors the dispatch in :meth:`Solver2D._rhs`; keep the two together. Returns None for
+    flux='hllc' with wb_method='audusse' although rhs_cuda builds a kernel for it, because
+    _rhs does not wire it up and warns that the run takes the Python RHS instead.
+    """
+    if not (_USING_CUPY and _HAS_FUSED_RHS):
+        return None                     # the NumPy _rhs needs the recon radius and no more
+    if cfg.well_balanced:
+        if cfg.wb_method == "srm":
+            return "wb_srm_hllc" if cfg.flux == "hllc" else "wb_srm"
+        return "wb_audusse" if cfg.flux == "lf" else None
+    if cfg.flux == "lf":
+        return "lf"                     # Config's recon enum is exactly the LF kernel set
+    return "first_hllc" if cfg.recon == "first" else None
+
+
+def _reject_cfl_robust_under_mpi(pct, comm):
+    """Refuse ``cfl_robust_pct`` on more than one rank: it is a per-rank percentile.
+
+    Checked at both entry points (:meth:`Solver2D.set_inside_mask` and
+    :meth:`Solver2D.cfl_dt`), because ``cfl_robust_pct`` is a public attribute that
+    ``__init__`` invites callers to assign directly.
+    """
+    if pct is not None and comm is not None and comm.size > 1:
+        raise ValueError(
+            f"cfl_robust_pct={pct} is single-rank only, and this run has {comm.size} ranks. "
+            f"Each rank would take the percentile over ITS OWN cells and cfl_dt then reduces "
+            f"those with MAX, which is not the global percentile: the more ranks, the fewer "
+            f"cells dropped in absolute terms, so dt drifts toward the strict maximum and the "
+            f"trajectory depends on the partition. Leave it None under MPI. To keep named "
+            f"cells out of the dt limit use set_cfl_ghost_mask, which only the fused fp32 "
+            f"lam-max kernel honours (the generic path ignores it).")
+
+
+# ---------------------------------------------------------------------------
 # 1D solver
 # ---------------------------------------------------------------------------
 
@@ -871,8 +984,19 @@ class Solver1D:
                 + ". These are honored only by Solver2D; remove them from the "
                 "Config or use Solver2D."
             )
-        # Allocate padded arrays.
+        # ngh must cover the write window of the branch _rhs will take (see _MIN_NGH). The
+        # windows are asymmetric, so this is not the stencil radius: linear5 needs 4, not 3.
         ngh = mesh.ngh
+        _scheme = "well_balanced=True" if cfg.well_balanced else f"recon={cfg.recon!r}"
+        _need = _MIN_NGH[1]["wb" if cfg.well_balanced else cfg.recon]
+        if ngh < _need:
+            raise ValueError(
+                f"{_scheme} needs ngh ≥ {_need} in 1D; got ngh={ngh}. Construct Mesh1D with "
+                f"at least ngh={_need}: _rhs writes the flux divergence only inside an "
+                f"asymmetric window, so the outermost interior cells get none of it. Their "
+                f"depth holds still while the bed-slope source keeps adding momentum to "
+                f"them, with no flux difference to balance it.")
+        # Allocate padded arrays.
         nxp = mesh.nx + 2 * ngh
         dt = np.dtype(cfg.dtype)
         # Accept host (NumPy) or device arrays alike: ``np`` is the backend
@@ -921,6 +1045,13 @@ class Solver1D:
             sigma0=self.sigma,
             max_iter=self.cfg.sigma_max_iter, tol=self.cfg.sigma_tol,
             bc=self.cfg.sigma_bc,
+            # The elliptic clamp, as Solver2D._compute_sigma passes it. Left out, this call
+            # took solve_sigma_1d's own H_MIN=1e-10 default, so sigma_h_min (and cfg.h_min
+            # with it) was inert in 1D: sigma_h_min=1.0 m on a 2 cm film beside 2 m of water
+            # moved Sigma by 0.0 where passing it moves the peak by 9.9e-3 of 1.6e-2. The
+            # velocity above keeps cfg.h_min and its dry-cell gate, which is the floor the
+            # shoreline clamp is documented not to disturb.
+            h_min=(self.cfg.sigma_h_min if self.cfg.sigma_h_min > 0.0 else self.cfg.h_min),
         )
         self.sigma = sigma
         return it
@@ -1228,16 +1359,22 @@ class Solver2D:
                     f"Config.manning_field must be the padded (nx+2*ngh, ny+2*ngh) = {_exp} "
                     f"array, got {tuple(cfg.manning_field.shape)}; pad an interior field with "
                     f"np.pad(n, mesh.ngh, mode='edge')")
-        # Assert ngh >= recon stencil radius so 5-cell recons
-        # (linear5/weno5) don't silently read stale ghost rows.
-        _RECON_RADIUS = {
-            "first":   1, "linear2": 1, "linear3": 1, "muscl":   1,
-            "linear5": 3, "weno5":   3,
-        }
-        _need = _RECON_RADIUS.get(cfg.recon, 1)
+        # ngh must cover what will RUN (see _MIN_NGH): the recon stencil radius, so a 5-cell
+        # recon does not silently read stale ghost rows, and -- when a fused CUDA kernel
+        # takes the step -- that kernel's own guard, which is wider and skips the cells
+        # outside it instead of reading them.
+        _fam = _fused_kernel_family_2d(cfg)
+        _r = _RECON_RADIUS.get(cfg.recon, 1)
+        _k = _MIN_NGH[2][_fam] if _fam is not None else 0
+        _need = max(_r, _k)
         if ngh < _need:
+            _why = (f"recon={cfg.recon!r} needs {_r}" if _k <= _r else
+                    f"the fused {_fam} kernel needs {_k} (its own guard, wider than the "
+                    f"{_r}-cell stencil: it skips every cell outside that halo, so the outer "
+                    f"interior rows and columns would never evolve and water would not leave "
+                    f"a 'fall' boundary)")
             raise ValueError(
-                f"recon={cfg.recon!r} needs ngh ≥ {_need}; got ngh={ngh}. "
+                f"ngh={ngh} is too small for this configuration: {_why}. "
                 f"Construct Mesh2D with at least ngh={_need}."
             )
         nxp = mesh.nx + 2 * ngh
@@ -1288,6 +1425,7 @@ class Solver2D:
         # OPT I: percentile-based robust max wave speed (None = use plain max).
         # Set to e.g. 99.99 to drop the top 0.01% of cells from the dt limit
         # (helps when 1-2 wet/dry hot pixels dominate dt unnecessarily).
+        # Single-rank only: the percentile is per rank, so cfl_dt refuses it under MPI.
         self.cfl_robust_pct = None
 
         # MPI halo exchange (multi-GPU runs).
@@ -1314,6 +1452,16 @@ class Solver2D:
             # neighbor's interior, not the local extrapolation. Without this,
             # the bed z-gradient at the partition boundary is wrong.
             self.halo.exchange(self.b)
+
+        # Say once that a research-tree switch this release does not implement is set. The
+        # other call site is inside _run_fused_forcings_dense, which the default dense fused
+        # step, every NumPy run and every fp64 run all bypass, so SWE_RAIN_GATHER=1 was
+        # swallowed in silence in exactly the production configuration the warning was
+        # written for. Here and not at module scope: module scope would fire for
+        # `import geoswe` in tooling, before a caller's warning filters are configured.
+        # Rank 0 only, so a 1000-rank job does not print 1000 copies.
+        if self.comm is None or self.comm.rank == 0:
+            _warn_unsupported_env()
 
     def _pad_bed(self):
         ngh = self.mesh.ngh
@@ -1347,9 +1495,14 @@ class Solver2D:
         :meth:`geoswe.CompressedSolver.from_dense` packs.
 
         ``cfl_robust_pct`` (for example 99.99) replaces the largest wave speed in
-        the time-step limit by that percentile over all cells, which drops a few
-        outlier cells at wet/dry fronts; ``None`` keeps the strict maximum.
+        the time-step limit by that percentile over this rank's cells, which drops a
+        few outlier cells at wet/dry fronts; ``None`` keeps the strict maximum. It is
+        single-rank only and refused under MPI, where the maximum of the per-rank
+        percentiles is not the global percentile; use :meth:`set_cfl_ghost_mask`
+        there. Setting it also drops the run off the fused fp32 time-step kernel and
+        off the fused dense step.
         """
+        _reject_cfl_robust_under_mpi(cfl_robust_pct, self.comm)
         self.cfl_robust_pct = cfl_robust_pct
         if mask is None:
             self.inside_mask = None
@@ -1387,29 +1540,8 @@ class Solver2D:
         # and the chaotic dt diverges. Enforce the padded-shape contract.
         # Take host arrays and any float table: the class array goes to the device as it is
         # (its dtype is checked below), the table is cast to the float32 the kernel reads.
-        cls_padded = np.asarray(cls_padded)
-        table = np.asarray(table, dtype=np.float32)
-        exp = tuple(self.q.shape[1:])
-        if tuple(cls_padded.shape) != exp:
-            raise ValueError(
-                f"set_manning_table expects a PADDED (nxp, nyp)={exp} class array "
-                f"(ghost cells included); got {tuple(cls_padded.shape)}. Build it "
-                f"as np.full((nx+2*ngh, ny+2*ngh), ...) with the interior filled, "
-                f"not inv.reshape(nx, ny)[i0:i1, j0:j1].")
-        # the RawKernel declares (const unsigned char*, const float*)
-        # and does NO dtype checking -- an int32 class array or float64 table
-        # is byte-reinterpreted into plausible-but-wrong Manning n, silently.
-        # An out-of-range class id is an out-of-bounds table read.
-        if cls_padded.dtype != np.uint8:
-            raise ValueError(f"set_manning_table: cls_padded must be uint8 "
-                             f"(kernel reads unsigned char*); got {cls_padded.dtype}. "
-                             f"Cast it with .astype(np.uint8).")
-        if not (getattr(cls_padded, "flags", None) is None or cls_padded.flags.c_contiguous):
-            raise ValueError("set_manning_table: cls_padded must be C-contiguous")
-        if int(cls_padded.max()) >= int(table.size):
-            raise ValueError(
-                f"set_manning_table: class id {int(cls_padded.max())} out of range "
-                f"for a {int(table.size)}-entry table (OOB device read)")
+        cls_padded, table = check_manning_table(
+            cls_padded, table, tuple(self.q.shape[1:]), who="set_manning_table")
         # Config's own warning cannot see a table set on the solver afterwards, and
         # unlike set_manning this does not switch friction on, so the run would be
         # silently frictionless -- with the roughness the large runs rely on in hand.
@@ -1722,7 +1854,12 @@ class Solver2D:
                 self.q, self.mesh.dx, self.mesh.dy, self.cfg.alpha,
                 sigma0=sigma_in,
                 max_iter=self.cfg.sigma_max_iter, tol=self.cfg.sigma_tol,
-                bc=self.cfg.sigma_bc, h_min=_sigma_h_min,
+                # h_min clamps h in the elliptic operator; h_vel is the wet/dry floor the
+                # velocities in the Sigma right-hand side divide by. Passed only the clamp,
+                # the kernel built that right-hand side from u = hu/sigma_h_min: at
+                # sigma_h_min=1.0 m a cell at h=0.01, hu=0.05 read u=0.05 where the CPU
+                # branch below derives 5.0, a factor 1e4 in the Sigma it drives.
+                bc=self.cfg.sigma_bc, h_min=_sigma_h_min, h_vel=self.cfg.h_min,
                 buffers=self._sigma_buffers,
                 halo_exchange=halo_cb,
                 halo_every=self.cfg.sigma_halo_every,
@@ -2000,6 +2137,10 @@ class Solver2D:
         elif not self._fused_forcings_eligible():
             ok, why = False, "fused forcings not eligible (friction/manning/dtype)"
         elif getattr(self, "_rain_in_kernel", False):
+            # Dead in this release: nothing sets _rain_in_kernel, and SWE_RAIN_GATHER=1 is
+            # warned about at construction instead. Kept rather than deleted so a tree that
+            # does set the attribute drops off the fused step here, instead of silently
+            # taking it with the rain row materialized after all.
             ok, why = False, "in-kernel rain gather (SWE_RAIN_GATHER=1)"
         else:
             # The rain kind (none, scalar, 2-D) belongs to the configured forcing, so check it
@@ -2124,8 +2265,9 @@ class Solver2D:
             # 2-D launch over the padded grid (the full-rectangle path has no compact list); the
             # halo exchange was blocking in _apply_bc, so there is no interior/band split here.
             k2 = R.build_dense_fstep2d_kernel(no_sigma, int(_WETDRY_KEEP_H), storage=storage, curve=curve)
-            b2 = (16, 16)
-            g2 = ((nxp + b2[0] - 1) // b2[0], (nyp + b2[1] - 1) // b2[1])
+            # the 2-D fused step is built from the SRM-HLLC source, so it follows that
+            # source's thread mapping (SWE_DENSE_XY) and its grid must swap with it
+            b2, g2 = R.dense_xy_launch(nxp, nyp)
             k2(g2, b2, (q[0], q[1], q[2], self.sigma, self.b, qn[0], qn[1], qn[2],
                         np.int32(nxp), np.int32(nyp), np.float32(1.0 / self.mesh.dx),
                         np.float32(1.0 / self.mesh.dy), np.float32(cfg.g), np.float32(cfg.h_min),
@@ -2508,6 +2650,10 @@ class Solver2D:
         lam = max_wave_speed_2d(self.q[:, ngh:-ngh, ngh:-ngh], g=cfg.g,
                                 h_min=h_cfl)
         if self.cfl_robust_pct is not None:
+            # Also checked here, not only in set_inside_mask: the attribute is public and
+            # __init__ invites assigning it directly, which would otherwise reach the
+            # per-rank percentile below with no word said.
+            _reject_cfl_robust_under_mpi(self.cfl_robust_pct, self.comm)
             lam_max = float(np.percentile(lam, self.cfl_robust_pct))
         else:
             lam_max = float(np.max(lam))

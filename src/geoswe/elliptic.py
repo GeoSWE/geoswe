@@ -59,6 +59,14 @@ def solve_sigma_1d(h, u, dx: float, alpha: float, sigma0=None, h_min: float = H_
     Returns sigma of same shape.
     """
     n = h.shape[0]
+    # Allocate in the caller's dtype, not np.zeros' float64 default: with a
+    # float32 state every array below was float64, so the Jacobi update ran in
+    # float64 and the returned Sigma came back float64 into a float32 solver
+    # (Solver1D.sigma). The 2D twin already does this through zeros_like(h).
+    # Pinning the dtype leaves a float64 run bit-identical and moves a float32
+    # one by 7.4e-8 relative (measured, under one float32 ulp), which is the
+    # fp32 arithmetic the caller asked for.
+    dtype = np.result_type(h, u)
     # Honor the caller's h_min (Config.sigma_h_min): a hard-coded floor here
     # would disable the documented shoreline clamp on CPU and make CPU/GPU
     # Sigma diverge near wet/dry fronts.
@@ -70,17 +78,17 @@ def solve_sigma_1d(h, u, dx: float, alpha: float, sigma0=None, h_min: float = H_
     # Discrete equation, cell i (interior):
     #   inv_h_i * Σ_i + α/dx^2 * [inv_h_face_{i-1/2}(Σ_i - Σ_{i-1}) + inv_h_face_{i+1/2}(Σ_i - Σ_{i+1})] = rhs_i
     # Diagonal:
-    diag = np.zeros(n)
+    diag = np.zeros(n, dtype=dtype)
     diag[1:-1] = inv_h[1:-1] + (alpha / dx**2) * (inv_h_face[:-1] + inv_h_face[1:])
     # Right-hand side:
     rhs_kin = velocity_grad_invariants_1d(u, dx)
     rhs = alpha * rhs_kin
-    sigma = np.zeros(n) if sigma0 is None else sigma0.copy()
+    sigma = np.zeros(n, dtype=dtype) if sigma0 is None else sigma0.copy()
     for it in range(max_iter):
         sigma_old = sigma.copy()
-        off = np.zeros(n)
+        off = np.zeros(n, dtype=dtype)
         off[1:-1] = (alpha / dx**2) * (inv_h_face[:-1] * sigma[:-2] + inv_h_face[1:] * sigma[2:])
-        new = np.zeros(n)
+        new = np.zeros(n, dtype=dtype)
         mask = diag > 0
         new[mask] = (rhs[mask] + off[mask]) / diag[mask]
         # Apply BCs: Neumann (∂Σ/∂n = 0) → ghost = first interior cell.

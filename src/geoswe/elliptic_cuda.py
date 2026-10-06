@@ -70,7 +70,7 @@ void __KNAME__(
     __T__* __restrict__ rhs,
     const __T__ alpha,
     const __T__ inv2dx, const __T__ inv2dy,
-    const __T__ h_min,
+    const __T__ h_vel,
     const int nx, const int ny)
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -81,12 +81,20 @@ void __KNAME__(
         rhs[idx] = (__T__)0.0;
         return;
     }
+    /* h_vel is the wet/dry velocity floor (Config.h_min), NOT the elliptic
+       operator's clamp (Config.sigma_h_min, which the Jacobi kernel applies).
+       Dividing by the operator clamp instead made a cell at h=0.01, hu=0.05
+       read u=0.05 here against u=5.0 in Solver2D._compute_sigma's own CPU
+       branch, once sigma_h_min was raised to the 1.0 m its own comment in
+       Config suggests for a shoreline. The two branches below are that CPU
+       branch's where(h > floor, hu/max(h, floor), 0) with floor = h_vel:
+       above the floor max(h, h_vel) is h, below it the velocity is zero. */
     #define UV_AT(II, JJ, U, V)                                         \
         do {                                                             \
             const int _id = (II) * ny + (JJ);                            \
-            __T__ _h = q0[_id]; if (_h < h_min) _h = h_min;              \
-            U = q1[_id] / _h;                                            \
-            V = q2[_id] / _h;                                            \
+            const __T__ _h = q0[_id];                                    \
+            if (_h > h_vel) { U = q1[_id] / _h; V = q2[_id] / _h; }      \
+            else            { U = (__T__)0.0; V = (__T__)0.0; }          \
         } while (0)
 
     __T__ uL, vL, uR, vR, uB, vB, uT, vT;
@@ -130,13 +138,24 @@ else:
 def solve_sigma_2d_cuda(q, dx: float, dy: float, alpha: float, sigma0=None,
                         max_iter: int = 10, tol: float = 0.0,
                         bc: str = "neumann", check_every: int = 10,
-                        h_min: float = 1.0e-10, buffers=None,
+                        h_min: float = 1.0e-10, h_vel: float | None = None, buffers=None,
                         halo_exchange=None, halo_every: int = 1,
                         phys_edges=(True, True, True, True)):
     """CUDA-accelerated 2D Jacobi solver for IGR elliptic equation.
 
     Inputs (CuPy arrays in the configured dtype):
         q       : shape (3, nx, ny), conservative state (h, hu, hv)
+        h_min   : clamp on h in the elliptic OPERATOR (``Config.sigma_h_min``),
+                  which conditions the 1/h factor near a shoreline.
+        h_vel   : wet/dry floor for the velocities that build the Sigma
+                  right-hand side (``Config.h_min``). Defaults to ``h_min``,
+                  i.e. one floor in both roles. Pass the two separately
+                  whenever ``Config.sigma_h_min`` exceeds ``Config.h_min``:
+                  otherwise the right-hand side divides by the operator clamp,
+                  which at sigma_h_min = 1.0 m on a 1 cm film (h=0.01,
+                  hu=0.05) gives u = 0.05 against the 5.0 of
+                  ``Solver2D._compute_sigma``, a factor 100 in u and 1e4 in
+                  the Sigma it drives.
         sigma0  : (nx, ny) warm-start, or None for zero start.
         buffers : dict of persistent work buffers; keys ``rhs`` and
                   ``sigma_new`` of shape (nx, ny). Reused across calls.
@@ -151,13 +170,15 @@ def solve_sigma_2d_cuda(q, dx: float, dy: float, alpha: float, sigma0=None,
     (``max_iter=10``, ``tol=0``) with warm start. Set ``tol > 0`` to
     re-enable tolerance-based termination.
     """
+    if h_vel is None:
+        h_vel = h_min
     if not USING_CUPY or _kernels is None:
         # CPU fallback: derive (h, u, v) and call the NumPy path.
         from .elliptic import solve_sigma_2d as cpu_solver
         h = q[0]
-        hsafe = xp.maximum(h, h_min)
-        u = xp.where(h > h_min, q[1] / hsafe, 0.0)
-        v = xp.where(h > h_min, q[2] / hsafe, 0.0)
+        hsafe = xp.maximum(h, h_vel)
+        u = xp.where(h > h_vel, q[1] / hsafe, 0.0)
+        v = xp.where(h > h_vel, q[2] / hsafe, 0.0)
         # Pass max_iter/tol through UNCHANGED: rewriting them (e.g. giving a
         # fixed-sweep tol=0 request a 1e-6 early exit) silently loosens
         # tighter tolerances and makes the same config produce different
@@ -194,7 +215,7 @@ def solve_sigma_2d_cuda(q, dx: float, dy: float, alpha: float, sigma0=None,
     cast = dtype
     k_rhs(grid, block,
           (q[0], q[1], q[2], rhs,
-           cast(alpha), cast(0.5 / dx), cast(0.5 / dy), cast(h_min),
+           cast(alpha), cast(0.5 / dx), cast(0.5 / dy), cast(h_vel),
            cp.int32(nx), cp.int32(ny)))
 
     # Warm-start Σ.

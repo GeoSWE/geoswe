@@ -1438,6 +1438,46 @@ void __KNAME__(
 # ===========================================================================
 _FUSED_RHS_WB_SRM_HLLC_COMPACT_SRC = None  # built at module-load below
 
+# SWE_DENSE_XY=1: map threadIdx.x to j, the contiguous axis, in the six 2-D residual kernels
+# (and the 2-D fused step built from the SRM-HLLC source), instead of to i.
+#
+# COALESCING: the state arrays are C-order (nx, ny), so consecutive memory runs along j. With
+# threadIdx.x -> i a warp of the shipped (16, 16) block spans 16 rows and 2 columns, so it
+# touches 16 cache lines and uses 8 bytes of each (the stride is ~81 kB at Pinellas 3 m). The
+# sibling kernels already moved: fused_forcings_dense behind SWE_FUSE_XY (2026-08, worth about
+# -25% there) and dense_carry_outside, which was written this way. Measured on an L40S, 2.0 to
+# 3.0x on the two kernels the dense Pinellas 3 m runners hit, bit-identical, with (32, 8)
+# slightly better than (16, 16).
+#
+# DEFAULT 0 for the 1.x series: the paper's dense-tier ms/step was measured on the legacy
+# mapping, so the published number stays reproducible out of the box. The coalesced mapping is
+# the intended default of a later release. Bit-identical either way: this changes which thread
+# touches which cell, not the arithmetic.
+#
+# The launch geometry MUST swap with the kernel, or part of the domain is never visited and the
+# residual is silently written on a subset of rows. Both launchers read dense_xy_enabled():
+# the residual launcher below, and Solver2D's 2-D fused step.
+_DENSE_XY = os.environ.get("SWE_DENSE_XY", "0") == "1"
+
+
+def dense_xy_enabled() -> bool:
+    """True when the 2-D dense kernels map threadIdx.x to the contiguous axis (SWE_DENSE_XY=1)."""
+    return _DENSE_XY
+
+
+def dense_xy_launch(nx: int, ny: int):
+    """Block and grid for a 2-D dense launch over ``(nx, ny)``, in the active mapping.
+
+    One place, because a kernel swapped without its grid leaves rows unvisited: with the
+    coalesced mapping blockIdx.x spans the j axis, so the grid's two entries swap too.
+    """
+    if _DENSE_XY:
+        block = (32, 8)
+        return block, ((ny + block[0] - 1) // block[0], (nx + block[1] - 1) // block[1])
+    block = (16, 16)
+    return block, ((nx + block[0] - 1) // block[0], (ny + block[1] - 1) // block[1])
+
+
 if USING_CUPY:
     import cupy as cp  # type: ignore
 
@@ -1480,6 +1520,28 @@ if USING_CUPY:
                     .replace(_SIG_ANCHOR,
                              "const int* __restrict__ inside_idx, const int n_inside)"))
     _FUSED_RHS_WB_SRM_HLLC_COMPACT_SRC = _src_compact
+
+    # SWE_DENSE_XY=1 (see the note above dense_xy_enabled): swap the thread-index dispatch of
+    # the 2-D residual sources, AFTER the compact source has been spliced out of the untouched
+    # SRM-HLLC text, so the anchor checks above keep working. The count assertion is the point:
+    # a source that does not carry the expected pair would otherwise keep the legacy mapping
+    # while its launcher swapped, which writes the residual on a subset of rows with no error.
+    if _DENSE_XY:
+        _XY_STRIDED = ("    const int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+                       "    const int j = blockIdx.y * blockDim.y + threadIdx.y;\n")
+        _XY_COALESCED = ("    const int j = blockIdx.x * blockDim.x + threadIdx.x;\n"
+                         "    const int i = blockIdx.y * blockDim.y + threadIdx.y;\n")
+        for _nm in ("_FUSED_RHS_SRC", "_FUSED_RHS_WB_SRC", "_FUSED_RHS_HLLC_FIRST_SRC",
+                    "_FUSED_RHS_WB_SRM_LF_SRC", "_FUSED_RHS_WB_SRM_HLLC_SRC",
+                    "_FUSED_RHS_WB_AUDUSSE_HLLC_SRC"):
+            _src_xy = globals()[_nm]
+            if _src_xy.count(_XY_STRIDED) != 1:
+                raise RuntimeError(
+                    f"SWE_DENSE_XY=1: {_nm} does not carry exactly one 2-D thread dispatch "
+                    f"(found {_src_xy.count(_XY_STRIDED)}). Refusing to remap a subset of the "
+                    f"kernels, which would write the residual on a subset of the rows. Unset "
+                    f"SWE_DENSE_XY to run the legacy mapping.")
+            globals()[_nm] = _src_xy.replace(_XY_STRIDED, _XY_COALESCED)
 
     def _build(t_c, recon, kname):
         if recon not in _RECON_MACROS:
@@ -1951,16 +2013,20 @@ void dense_carry_outside(
         + _GD_BODY +
         "        }\n")
     _DFSTEP_WRITE_OLD = ("        qn0[idx] = h; qn1[idx] = hu; qn2[idx] = hv;\n"
-                         "        if (have_max && h > max_h[idx]) max_h[idx] = h;\n")
+                         "        if (have_max && interior && h > max_h[idx]) max_h[idx] = h;\n")
     _CARRY_WRITE_OLD = ("    qn0[idx] = h; qn1[idx] = hu; qn2[idx] = hv;\n"
                         "    if (have_max && h > max_h[idx]) max_h[idx] = h;\n")
 
-    def _force_write(indent, nx_name, ny_name):
-        """Running max first (it tracks the stepped state), then the forcings, then the write."""
+    def _force_write(indent, nx_name, ny_name, max_gate=""):
+        """Running max first (it tracks the stepped state), then the forcings, then the write.
+
+        max_gate carries the running max's extra condition: the fused step tracks it on the
+        interior only (_DFSTEP_TAIL_NEW, so the ghost ring is never written), the carry kernel
+        over the whole padded grid."""
         body = _FORCE_BODY.replace("__NX__", nx_name).replace("__NY__", ny_name)
         if indent != "        ":
             body = "\n".join((indent + ln[8:]) if ln.startswith("        ") else ln for ln in body.split("\n"))
-        return (f"{indent}if (have_max && h > max_h[idx]) max_h[idx] = h;\n" + body
+        return (f"{indent}if (have_max{max_gate} && h > max_h[idx]) max_h[idx] = h;\n" + body
                 + f"{indent}qn0[idx] = h; qn1[idx] = hu; qn2[idx] = hv;\n")
 
     # Fused CFL with the step forcings: the lambda of the NEW state is reduced after the forcings.
@@ -2030,7 +2096,9 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
         """Compact SRM-HLLC fp32 kernel with the update fused in (see above). storage=True adds
         the per-cell 1/sigma of sub-grid channel storage to the h update (last argument);
         curve=True also applies the storage curve (arguments inv_sig, sto_k); force=True appends
-        the step forcings (_FORCE_BODY; arguments after the storage ones). force excludes cfl."""
+        the step forcings (_FORCE_BODY; arguments after the storage ones). force and cfl combine:
+        solver.py sets fcfl = frc_cfl under force, and the lambda is then reduced after the
+        forcings and skips the clamp cells (_LAM_GHOST_FRC)."""
         curve = bool(storage and curve)
         key = ("fstep", bool(no_sigma), bool(cfl), bool(storage), curve, bool(force))
         if key in _dfstep_kernels:
@@ -2042,8 +2110,8 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
         tail_new = _DFSTEP_TAIL_NEW
         if cfl:
             tail_new = (_DFSTEP_TAIL_NEW.replace(
-                "        if (have_max && h > max_h[idx]) max_h[idx] = h;\n    }\n",
-                "        if (have_max && h > max_h[idx]) max_h[idx] = h;\n" + _DFSTEP_CFL_LAM + "    }\n")
+                "        if (have_max && interior && h > max_h[idx]) max_h[idx] = h;\n    }\n",
+                "        if (have_max && interior && h > max_h[idx]) max_h[idx] = h;\n" + _DFSTEP_CFL_LAM + "    }\n")
                 + _DFSTEP_CFL_REDUCE)
             assert tail_new != _DFSTEP_TAIL_NEW + _DFSTEP_CFL_REDUCE
         if storage:
@@ -2052,7 +2120,7 @@ void ring_forcings(float* __restrict__ q0, float* __restrict__ q1, float* __rest
             if tail_new.count(_DFSTEP_WRITE_OLD) != 1:
                 raise RuntimeError("dense fused-step forcings: write anchor count != 1")
             sig_new = sig_new[:-1] + _DFSTEP_FORCE_SIG_EXTRA
-            tail_new = tail_new.replace(_DFSTEP_WRITE_OLD, _force_write("        ", "nx", "ny"))
+            tail_new = tail_new.replace(_DFSTEP_WRITE_OLD, _force_write("        ", "nx", "ny", " && interior"))
             if cfl:
                 if tail_new.count(_LAM_GHOST_OLD) != 1:
                     raise RuntimeError("dense fused-step forcings+cfl: lambda anchor count != 1")
@@ -2475,8 +2543,7 @@ def fused_rhs_linear2_lf_2d(q, sigma, b, dx: float, dy: float, g: float = 9.81,
     else:
         mask_ptr = inside_mask
 
-    block = (16, 16)
-    grid = ((nx + block[0] - 1) // block[0], (ny + block[1] - 1) // block[1])
+    block, grid = dense_xy_launch(nx, ny)
     kernel(
         grid, block,
         (q[0], q[1], q[2],

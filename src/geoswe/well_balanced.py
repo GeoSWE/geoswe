@@ -104,7 +104,11 @@ def hr_source_1d(q, b, dx: float, g: float = G, h_min: float = H_MIN):
     # So Sb[1:-1, :] (length N-2) <-- h_inside_right[1:, :] (length N-2) and
     #                                  h_inside_left[:-1, :]  (length N-2).
     N = h.shape[0]
-    Sb = np.zeros(N)
+    # Allocate in the state's dtype, not np.zeros' float64 default: a float32
+    # run otherwise gets a full-grid float64 field (4 B/cell of excess) on every
+    # RHS evaluation. The expression below is already evaluated in float32
+    # there, so pinning the dtype stores the same bits, not a rounded value.
+    Sb = np.zeros(N, dtype=np.result_type(h, b))
     Sb[1:-1] = 0.5 * g / dx * (h_inside_right[1:] ** 2 - h_inside_left[:-1] ** 2)
     return Sb
 
@@ -192,10 +196,11 @@ def hr_source_2d(q, b, dx: float, dy: float, g: float = G, h_min: float = H_MIN)
     #     Sbx[i,j] = (0.5g/dx) * [ (h_inside_right_x[i,j])^2 - (h_inside_left_x[i,j])^2 ]
     #     where h_inside_right_x[i,j] = hL_x[i, j]      (cell i's right face, inside depth on cell-i side)
     #     and   h_inside_left_x[i,j]  = hR_x[i-1, j]    (cell i's left face,  inside depth on cell-i side)
-    Sbx = np.zeros((Nx, Ny))
+    dtype = np.result_type(h, b)   # see hr_source_1d: float64 zeros cost a float32 run 8 B/cell per RHS
+    Sbx = np.zeros((Nx, Ny), dtype=dtype)
     Sbx[1:-1, :] = 0.5 * g / dx * (hL_x[1:, :] ** 2 - hR_x[:-1, :] ** 2)
 
-    Sby = np.zeros((Nx, Ny))
+    Sby = np.zeros((Nx, Ny), dtype=dtype)
     Sby[:, 1:-1] = 0.5 * g / dy * (hB_y[:, 1:] ** 2 - hT_y[:, :-1] ** 2)
 
     return Sbx, Sby
@@ -336,6 +341,10 @@ def srm_source_2d(q, b, dx: float, dy: float, g: float = G, h_min: float = H_MIN
     src_l = _srm_cell_source(h[1:, :], eta[1:, :], b[1:, :], zf0_x, -dzc_x,
                              h[:-1, :], hR_x, g, h_min) * wet_x
 
+    # float64 on purpose (unlike hr_source_2d): these two accumulate nearly
+    # cancelling face terms into one array, so a float32 allocation rounds the
+    # sum and moves 189 of 2304 cells by up to 0.5 ulp on a float32 bowl,
+    # which would make tests/parity_gate.py's stated fp32 expectation stale.
     Sbx = np.zeros((Nx, Ny))
     Sbx[:-1, :] -= src_r / dx
     Sbx[1:, :]  += src_l / dx
@@ -346,7 +355,7 @@ def srm_source_2d(q, b, dx: float, dy: float, g: float = G, h_min: float = H_MIN
     src_b = _srm_cell_source(h[:, 1:], eta[:, 1:], b[:, 1:], zf0_y, -dzc_y,
                              h[:, :-1], hT_y, g, h_min) * wet_y
 
-    Sby = np.zeros((Nx, Ny))
+    Sby = np.zeros((Nx, Ny))    # float64 on purpose: see Sbx above
     Sby[:, :-1] -= src_t / dy
     Sby[:, 1:]  += src_b / dy
 
@@ -409,7 +418,7 @@ def srm_source_1d(q, b, dx: float, g: float = G, h_min: float = H_MIN):
     src_r = _srm_cell_source(h[:-1], e_L, b_L, z_f0, dz_clip, h[1:], hL, g, h_min) * wet
     src_l = _srm_cell_source(h[1:], e_R, b_R, z_f0, -dz_clip, h[:-1], hR, g, h_min) * wet
 
-    Sb = np.zeros(N)
+    Sb = np.zeros(N)            # float64 on purpose: see srm_source_2d
     Sb[:-1] -= src_r / dx
     Sb[1:] += src_l / dx
     return Sb

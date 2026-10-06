@@ -167,6 +167,7 @@ runs in CI, which is CPU-only (`pytest -m "not gpu"`).
 | `SWE_CFL_BLOCKRED` |  | `1` | 1 (default) = block-level CFL reduction kernel | `compressed_solver.py` |
 | `SWE_DENSE_FUSE_CFL` |  | `0` | 1 = reduce the next CFL inside the dense fused step (default 0) | `solver.py` |
 | `SWE_DENSE_FUSE_STEP` |  | `1` | 1 (default) = fused residual+update on the dense path | `solver.py` |
+| `SWE_DENSE_XY` |  | `0` | 1 = the 2-D dense kernels map `threadIdx.x` to the contiguous array axis, as the fused forcings kernel already does under `SWE_FUSE_XY`, and the launch geometry swaps with them. Bit-identical; measured on an L40S at 4.2 M cells, 0.722 to 0.470 ms/step (1.53x). Default 0 so the paper's dense-tier timings reproduce out of the box; it is the intended default of a later release | `rhs_cuda.py` |
 | `SWE_DENSE_HALO_OVERLAP` |  | `1` | 1 (default) = overlap the dense halo exchange with interior compute (needs an inside mask) | `solver.py` |
 | `SWE_DENSE_MAXRREG` |  | `auto` | register cap for the dense residual kernel: `auto` (default) / integer / 0. `auto` caps at 40 on sm_90 (H100), where it lifts occupancy to 75 % and is bit-identical, and leaves the cap off elsewhere, because on sm_120 (Blackwell) a cap of 40 was not bit-identical. NVIDIA only; ignored with a warning on AMD GPUs | `rhs_cuda.py` |
 | `SWE_DRY_SKIP` |  | unset | 1 = early-out for all-dry cells in the compressed residual (opt-in; not available together with the default `SWE_FLAT_FUSE_CFL=1`) | `compressed_rhs.py` |
