@@ -5,25 +5,27 @@ All notable changes to GeoSWE are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) under the compatibility
 promise below.
 
-## [1.0.0] - 2026-10-06
+## [1.1.0] - 2026-10-06
 
-First public release.
+Everything the pre-release review produced. 1.0.0 was uploaded to PyPI before the review
+landed, and PyPI versions are immutable, so the review's fixes ship here instead. If you
+installed 1.0.0, upgrade: it clips terrain above 50 m in `clean_dem` without saying so, and a
+`--compressed` run through the run driver lays no rainfall at all.
 
 ### Added
 
-- Dense and compressed solvers for the 2D nonlinear shallow-water equations: HLLC and local
-  Lax-Friedrichs fluxes, surface-reconstruction and hydrostatic-reconstruction well balancing,
-  first-order through fifth-order reconstruction, forward Euler and SSP-RK3.
-- The compressed active-cell mesh, which stores and updates only the cells that matter and
-  reaches continental domains on a single node.
-- Rainfall and observation-driven coastal-stage forcings, implicit Manning friction,
-  wetting and drying, sub-grid channel storage, infiltration and linear-reservoir drains.
-- Multi-GPU execution with `mpi4py`, on NVIDIA GPUs through CuPy's CUDA builds and on AMD
-  GPUs through its ROCm build, with a NumPy CPU fallback.
-- `geoswe.runlib`, the run driver behind the published county-to-continent cases, and the
-  benchmark suites under `benchmark/`.
+- `tests/data/` fixtures and a CI leg that installs the GIS and forcings extras, so the
+  ingestion layer (`data_prep`, `gauges`, `io_geotiff`) is exercised rather than only imported.
+- `--dt-min` and `GEOSWE_DT_MIN`: a step-size floor that stops a run whose time step has
+  collapsed, instead of grinding out the whole allocation. Both step loops honour it.
+- `SWE_DENSE_XY=1` maps `threadIdx.x` to the contiguous array axis in the 2-D dense kernels.
+  Measured on an L40S at 4.2 M cells, 0.722 to 0.470 ms/step, a 1.53x whole-step speedup, and
+  bit-identical. Default off in 1.x, because the paper's dense-tier timings were measured on
+  the legacy mapping; it is the intended default of a later release.
+- A kernel-source compile check that runs without a GPU (skipped when `nvcc` is absent), and
+  `python -m geoswe.runlib` imports on a NumPy-only install, both as CI guards.
 
-### Fixed in this release, after the pre-release review
+### Fixed
 
 - A periodic axis now wraps the ghost bed instead of extrapolating it. Lake at rest over a
   periodic bed held only on one rank before; a partitioned run wrapped the bed through the
@@ -90,6 +92,61 @@ First public release.
   section, and the rest name the checks that actually cover them. "dense", "flat-full" and
   "flat-active", which carry the headline accuracy and speed numbers, are defined in one place
   and used consistently.
+- The dense fused step refused every kernel variant with a fused CFL reduction or fused step
+  forcings. A fix inside the pre-release series added an interior gate to the kernel text
+  without updating the two splice anchors that search for it, so `SWE_DENSE_FUSE_CFL=1` and
+  `Solver2D.set_step_forcings` raised on the first step. Measured: 18 of 24 build combinations
+  refused. Both paths are now covered by equality tests.
+- The run driver carries its rainfall to the compressed solver. Only the native-grid spatial
+  product reached it, so a `--compressed` run with the default uniform rainfall laid no rain at
+  all and reported a plausible-looking result.
+- `clean_dem` and `merge_dems_to_grid` no longer clip elevations by default, and when a caller
+  asks for a range they report how many cells it moved. The old default of (-15, 50) m was one
+  county's range: on a 120 m hillslope it silently flattened 57.8% of the cells.
+- `mrms_to_uniform_timeseries` raises instead of returning an all-zero storm when the GRIB
+  reader is missing or every file failed. A zero-rain return is indistinguishable from a
+  legitimate dry deck, and the driver would then run a rainfall flood with no rain.
+- `RainfallForcing` and `StageBoundary` reject times that step backwards, which both lookups
+  resolved to the wrong sample in silence, and the CSV loaders sort and say so.
+- The gauge recorder refuses an unpadded bed (it read a cell `ngh` away and reported a
+  plausible elevation) and samples on a fixed cadence instead of drifting by one step each time.
+- `reproject_to_utm` followed by `nlcd_to_manning` reports what a bilinear resampling did to a
+  categorical raster: measured 53.1% of cells falling through to the default roughness and two
+  land-cover classes that the input never held.
+- `Solver2D` and `Solver1D` derive the minimum ghost width from the kernels that will run, not
+  from the reconstruction stencil alone. `Mesh2D(ngh=1)` with the shipped defaults ran a kernel
+  needing 2, and the outer interior rows and columns never evolved, with no error.
+- `cfl_robust_pct` is refused under MPI, where a per-rank percentile reduced with MAX is not the
+  global percentile and the trajectory depends on the partition.
+- `_warn_unsupported_env` is reachable: an ignored performance switch now warns at construction
+  instead of only inside a path the default configuration bypasses.
+- The compressed tier: `run_cached` takes `dt_max`/`dt_min`; `pack`/`unpack` refuse a field on
+  another extent (CuPy wraps out-of-range indices instead of raising); the int16 neighbour-table
+  message names the real remedies and the bound is screened before the table is built;
+  `save_cache`'s dead marker kernel is gone; three rank-local raises are collective, so one
+  rank's failure no longer leaves the others in a collective until the wall clock.
+- The 2 GiB dense gather guard fires at setup instead of after the solve, so a multi-day run no
+  longer raises in place of writing its output.
+- `runlib` docstrings describe what the modules do, not their extraction from a private tree,
+  and `python -m geoswe.runlib.replay` is no longer advertised where it does nothing.
+
+## [1.0.0] - 2026-10-06
+
+First public release. The artifact published on PyPI predates the pre-release review, so the
+fixes listed under 1.1.0 are **not** in it; it is yanked in favour of 1.1.0.
+### Added
+
+- Dense and compressed solvers for the 2D nonlinear shallow-water equations: HLLC and local
+  Lax-Friedrichs fluxes, surface-reconstruction and hydrostatic-reconstruction well balancing,
+  first-order through fifth-order reconstruction, forward Euler and SSP-RK3.
+- The compressed active-cell mesh, which stores and updates only the cells that matter and
+  reaches continental domains on a single node.
+- Rainfall and observation-driven coastal-stage forcings, implicit Manning friction,
+  wetting and drying, sub-grid channel storage, infiltration and linear-reservoir drains.
+- Multi-GPU execution with `mpi4py`, on NVIDIA GPUs through CuPy's CUDA builds and on AMD
+  GPUs through its ROCm build, with a NumPy CPU fallback.
+- `geoswe.runlib`, the run driver behind the published county-to-continent cases, and the
+  benchmark suites under `benchmark/`.
 
 ## Compatibility promise for 1.x
 
@@ -100,6 +157,10 @@ Within the 1.x series, these are stable and will not break without a major-versi
 - The documented `geoswe.runlib` entry points: `driver.main`, `cli.build_parser`,
   `case.load_case`, `replay.main`.
 - The fields of `Config` and their meanings, and the `GEOSWE_BACKEND` environment variable.
+- The input-preparation helpers, as of 1.1.0: `geoswe.data_prep`, `geoswe.gauges` and
+  `geoswe.io_geotiff`. They ship in the wheel with user-facing docstrings, so 1.1.0 gave them
+  guards, tests, a CI leg that installs their dependencies and an API page, rather than leave
+  their status ambiguous. They need the `io` and `forcings` extras.
 
 Not covered, and free to change in a minor release: the `SWE_*` and `GEOSWE_*` performance,
 benchmark and debugging switches documented in `docs/configuration.md`, anything whose name

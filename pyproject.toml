@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # One token for the distribution, the repository and the import name.
 name = "geoswe"
-version = "1.0.0"
+version = "1.1.0"
 description = "GeoSWE (Geophysical Shallow-Water Engine): a GPU flood solver with a NumPy CPU fallback."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -65,7 +65,7 @@ all = ["geoswe[gpu,mpi,io,forcings,examples]"]
 
 [project.urls]
 Homepage = "https://github.com/GeoSWE/geoswe"
-Documentation = "https://geoswe.github.io/geoswe"
+Documentation = "https://geoswe.readthedocs.io"
 Repository = "https://github.com/GeoSWE/geoswe"
 Issues = "https://github.com/GeoSWE/geoswe/issues"
 Changelog = "https://github.com/GeoSWE/geoswe/blob/main/CHANGELOG.md"

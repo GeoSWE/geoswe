@@ -10,9 +10,10 @@ from a 3 m coastal county to the conterminous United States on one multi-GPU nod
 <p align="center">
   <a href="https://github.com/GeoSWE/geoswe/actions/workflows/test.yml"><img src="https://github.com/GeoSWE/geoswe/actions/workflows/test.yml/badge.svg" alt="tests"></a>
   <a href="https://github.com/GeoSWE/geoswe/actions/workflows/lint.yml"><img src="https://github.com/GeoSWE/geoswe/actions/workflows/lint.yml/badge.svg" alt="lint"></a>
-  <a href="https://github.com/GeoSWE/geoswe/actions/workflows/docs.yml"><img src="https://github.com/GeoSWE/geoswe/actions/workflows/docs.yml/badge.svg" alt="docs"></a>
+  <a href="https://geoswe.readthedocs.io"><img src="https://readthedocs.org/projects/geoswe/badge/?version=latest" alt="docs"></a>
   <a href="https://github.com/GeoSWE/geoswe/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg" alt="BSD 3-Clause"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/GPU-NVIDIA%20%7C%20AMD-76b900.svg" alt="NVIDIA and AMD GPUs">
 </p>
 
 *Above: 72 hours of Hurricane Helene (September 2024) simulated by the same code on three nested domains: MRMS rainfall in purple, flood depth in color, and the NOAA CO-OPS tide gauges that drive the coastal boundary as stars. [Full-resolution video (MP4)](https://github.com/GeoSWE/geoswe/blob/main/docs/images/helene_cascade.mp4).*
@@ -88,7 +89,7 @@ pip install -e ".[all]"
 The development version installs straight from the repository:
 `pip install "geoswe @ git+https://github.com/GeoSWE/geoswe.git"`.
 
-See the [installation page](https://geoswe.github.io/geoswe/installation.html) for CUDA and CuPy version notes and the conda environment, and the [AMD GPUs page](https://geoswe.github.io/geoswe/amd_gpus.html) for ROCm.
+See the [installation page](https://geoswe.readthedocs.io/en/latest/installation.html) for CUDA and CuPy version notes and the conda environment, and the [AMD GPUs page](https://geoswe.readthedocs.io/en/latest/amd_gpus.html) for ROCm.
 
 ## Quick start
 
@@ -119,7 +120,7 @@ print(f"deepest water {peak.max():.2f} m; {100 * (peak > 0.05).mean():.0f}% of t
 
 `Config()` with no arguments is the production scheme of the paper (first-order
 HLLC, SRM well balancing, forward Euler, CFL 0.5). The
-[flood tutorial](https://geoswe.github.io/geoswe/flood_tutorial.html) explains each line and adds your own
+[flood tutorial](https://geoswe.readthedocs.io/en/latest/flood_tutorial.html) explains each line and adds your own
 GeoTIFF terrain, a tide or surge, and the compressed active-cell mesh.
 
 [`examples/`](https://github.com/GeoSWE/geoswe/tree/main/examples) has runnable scripts for 1D and 2D dam breaks, a
@@ -140,7 +141,7 @@ release; they exercise the same solver paths as the Pinellas case.
 ## Documentation
 
 User guide, configuration reference, the compressed mesh, multi-GPU runs, and
-the API reference: **https://geoswe.github.io/geoswe** (or build locally with
+the API reference: **https://geoswe.readthedocs.io** (or build locally with
 `pip install ".[docs]" && sphinx-build -b html docs docs/_build`).
 
 ## Citing

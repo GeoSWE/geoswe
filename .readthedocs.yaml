@@ -1,0 +1,25 @@
+# Read the Docs build configuration.
+# https://docs.readthedocs.io/en/stable/config-file/v2.html
+#
+# The documentation is published at https://geoswe.readthedocs.io. The same build
+# runs as a CI check on every push (.github/workflows/docs.yml), so a broken
+# reference fails the pull request rather than the published site.
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.12"
+
+sphinx:
+  configuration: docs/conf.py
+  # The same strictness as CI: a warning is a failure. docs/conf.py mocks the GPU
+  # and GIS stacks, so nothing here needs CUDA, MPI or rasterio.
+  fail_on_warning: true
+
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs

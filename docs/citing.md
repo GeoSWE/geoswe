@@ -8,7 +8,7 @@ repository root (GitHub renders a "Cite this repository" button from it).
 @software{geoswe,
   title   = {{GeoSWE}: Geophysical Shallow-Water Engine},
   author  = {Chen, Peng},
-  year    = {2026},  version = {1.0.0},
+  year    = {2026},  version = {1.1.0},
   license = {BSD-3-Clause},
   url     = {https://github.com/GeoSWE/geoswe}
 }

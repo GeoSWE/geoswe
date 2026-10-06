@@ -12,8 +12,8 @@ sys.path.insert(0, os.path.abspath("../src"))
 project = "GeoSWE"
 author = "Peng Chen"
 copyright = "2026, Peng Chen and the GeoSWE contributors"
-release = "1.0.0"
-version = "1.0"
+release = "1.1.0"
+version = "1.1"
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -59,7 +59,7 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "dev"]   # docs/dev is i
 html_theme = "furo"
 html_title = "GeoSWE"
 html_static_path = []
-html_baseurl = "https://geoswe.github.io/geoswe/"
+html_baseurl = "https://geoswe.readthedocs.io/en/latest/"
 
 
 # -- Unreleased Config fields ----------------------------------------------------
