@@ -1,9 +1,16 @@
-"""runlib.driver: shared coastal surge+rain run driver (dense + compressed).
+"""runlib.driver: the dense and compressed run driver for a coastal surge and rain case.
 
-driver.main() is the byte-identical body of run_pinellas_mpi.py's main(), with only case-loading
-factored to runlib.case.load_case and the event-specific tide inputs (gauge_csv_map / tide_dir /
-t0_ts) passed in by the thin wrapper. Everything else (forcings, step loop, IO, compressed branch)
-is verbatim, so a dense run is bit-identical to the validated runner (the Phase-2b gate).
+:func:`main` takes the options parsed by :mod:`geoswe.runlib.cli`, the case conditioned by
+:func:`geoswe.runlib.case.load_case` and the event's tide inputs, and runs the case from end to
+end: the MPI decomposition, the initial stage, the forcings (stage ring, rainfall, Green-Ampt
+infiltration, drains, sub-grid channel storage, open-boundary sponge, stage clamps), the step
+loop, and the outputs (depth frames, state snapshots, the max-depth and final-depth GeoTIFFs,
+the per-gauge cross-section CSVs). With ``--compressed`` the same setup is handed to the flat
+active-cell step loop of :mod:`geoswe.compressed_solver` instead of the dense one.
+
+The event-specific inputs (the gauge CSV map, the tide directory, the event's t=0) are
+parameters, so one driver serves every case; ``benchmark/pinellas_3m/run_pinellas_mpi.py`` is a
+runner that supplies them and pins one GPU per MPI rank first.
 """
 from __future__ import annotations
 import os, sys, time
@@ -17,6 +24,7 @@ from ..solver import Solver2D, Config
 from ..forcing import RainfallForcing
 from ..io_geotiff import GeoArray, write_geotiff
 from .case import load_case
+from . import _abort_all_ranks
 
 
 class StateSnapshots:
@@ -90,7 +98,6 @@ class StateSnapshots:
 
     def _truncate_to(self, n_times):
         """Rewrite the .npy header for ``n_times`` frames and cut the file to length."""
-        import io
         import warnings
         import numpy.lib.format as _fmt
         try:
@@ -139,20 +146,35 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
 
     Parameter contract:
 
-    * ``comm`` -- a real mpi4py communicator (``comm.rank`` is used
+    * ``comm``: a real mpi4py communicator (``comm.rank`` is used
       unconditionally); pass ``MPI.COMM_WORLD`` even single-rank.
-    * ``gauge_csv_map`` -- ``{station_name: csv_filename}`` for the ring gauges.
-    * ``tide_dir`` -- ``pathlib.Path`` containing those CSVs.
-    * ``t0_ts`` -- tz-aware ``pandas.Timestamp`` of simulation ``t=0``.
-    * ``proc_dtype`` -- dtype for host-side preprocessing arrays.
-    * ``sponge_impl`` -- ``"elementwise"`` (Helene-validated) or ``"band"`` (Milton).
+    * ``gauge_csv_map``: ``{station_name: csv_filename}`` for the ring gauges.
+    * ``tide_dir``: ``pathlib.Path`` containing those CSVs.
+    * ``t0_ts``: tz-aware ``pandas.Timestamp`` of simulation ``t=0``.
+    * ``proc_dtype``: dtype for host-side preprocessing arrays.
+    * ``sponge_impl``: ``"elementwise"``, the full-grid sponge kernel of the published
+      3 m runs, or ``"band"``, the band-only kernel of the 10 m runs. They differ only
+      in the dead open-ocean corner, which the band kernel damps twice.
 
-    (The old ``event`` parameter was never read and has been removed.)
+    A failure on one rank aborts the whole job, instead of leaving the other ranks waiting in
+    the next collective until the scheduler's wall clock.
     """
-    # sponge_impl: "elementwise" reproduces the pinellas_helene runner bit-for-bit (full-grid
-    # ElementwiseKernel). "band" reproduces the pinellas_milton runner (M19_OPT band-only
-    # RawKernel: applies the damp only on the +x/+y bands, double-applying the top-right corner;
-    # identical everywhere a gauge/flood lives; differs only in the dead open-ocean corner).
+    try:
+        return _run_case(args, comm=comm, gauge_csv_map=gauge_csv_map, tide_dir=tide_dir,
+                         t0_ts=t0_ts, proc_dtype=proc_dtype, sponge_impl=sponge_impl)
+    except (Exception, KeyboardInterrupt) as exc:
+        # Exception, not BaseException: the uniform sys.exit(1) of the --dims check below must
+        # stay a clean exit on every rank, and only an unexpected failure needs the job down.
+        _abort_all_ranks(comm, exc)
+        raise
+
+
+def _run_case(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype, sponge_impl):
+    """The body of :func:`main`, which wraps this call in the job-abort handler."""
+    # sponge_impl: "elementwise" is the full-grid ElementwiseKernel of the published 3 m runs.
+    # "band" is the band-only RawKernel of the 10 m runs: it damps the +x/+y bands only and
+    # applies the top-right corner twice, which is identical everywhere a gauge or a flood
+    # lives and differs only in the dead open-ocean corner.
 
     os.environ.setdefault("GEOSWE_VERBOSE", "1")   # a case run logs the kernel path it takes
 
@@ -286,6 +308,22 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         # ---- Slice spatial inputs ----
         i0_glob = cx * Nx_loc; i1_glob = i0_glob + Nx_loc
         j0_glob = cy * Ny_loc; j1_glob = j0_glob + Ny_loc
+    # A dense MPI run ends by gathering max_depth and final_depth to rank 0 in one MPI call
+    # each, so the global f32 field has to fit the 2 GiB MPI count limit. Refuse it here, where
+    # nx_glob/ny_glob are final: the check used to sit at the gather itself, after the whole
+    # solve, so a multi-day run burned its hours and then raised instead of writing
+    # max_depth.tif, and with the default --frame-every-s 0.0 nothing checked it earlier. Every
+    # rank computes the same numbers, so every rank raises. Gated on the dense path:
+    # --compressed is the configuration meant to work at this scale and writes its rasters as
+    # per-rank shards stitched on disk, and --frame-parallel splits only the depth frames, not
+    # these two gathers.
+    if comm.size > 1 and not args.compressed and nx_glob * ny_glob * 4 >= 2**31:
+        raise RuntimeError(
+            f"a dense MPI run on {nx_glob}x{ny_glob} cells cannot gather its output fields to "
+            f"rank 0: {nx_glob * ny_glob * 4 / 2**30:.2f} GiB of float32 exceeds the 2 GiB MPI "
+            f"count limit. Run this size with --compressed, which writes max_depth.tif and "
+            f"final_depth.tif as per-rank shards stitched on disk")
+
     bed_loc = bed_glob[i0_glob:i1_glob, j0_glob:j1_glob]
     manning_loc = manning_glob[i0_glob:i1_glob, j0_glob:j1_glob]
     inside_loc = inside_glob[i0_glob:i1_glob, j0_glob:j1_glob]
@@ -341,6 +379,24 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
     if args.rainfall_spatial_npz is not None:
         sr = np.load(args.rainfall_spatial_npz, allow_pickle=True)
         t_s_sr = sr["t_s"].astype(np.float64)
+        # Both spatial products below find their frame with bisect on this table, which assumes
+        # it increases and never checked. A deck whose rows lost their order (concatenated
+        # downloads, a sort dropped in preprocessing) then silently returns the wrong frame:
+        # measured on a two-frame product written in reverse, 0.000038 m of water on the land
+        # cells instead of 0.009796 m, under the same reassuring "2 frames t=[0.00,0.12]h" log
+        # line, because that line prints min and max. Equal timestamps are left alone: radar
+        # and gauge decks hold them and bisect handles them.
+        if t_s_sr.size == 0:
+            raise ValueError(f"rainfall npz {args.rainfall_spatial_npz}: 't_s' is empty; it holds "
+                             f"one frame time (seconds after sim t=0) per rain frame")
+        _dt_sr = np.diff(t_s_sr)
+        if np.any(_dt_sr < 0.0):
+            _k = int(np.argmax(_dt_sr < 0.0)) + 1
+            raise ValueError(
+                f"rainfall npz {args.rainfall_spatial_npz}: 't_s' decreases at index {_k} "
+                f"({t_s_sr[_k-1]:.1f} s then {t_s_sr[_k]:.1f} s); the frame lookup is a "
+                f"bisection, so the run would lay the wrong frame. Sort 't_s' and the rain "
+                f"frames together (np.argsort on t_s) where the npz is built")
         _rain_toff = float(os.environ.get("SWE_RAIN_TOFFSET_S", "0"))   # explicit, auditable MRMS time-base correction
         if _rain_toff:
             t_s_sr = t_s_sr + _rain_toff
@@ -1081,8 +1137,8 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         cp.get_default_memory_pool().free_all_blocks()
 
         if sponge_impl == "band":
-            # M19_OPT band-only RawKernel (verbatim from the pinellas_milton runner).
-            # 2 separate band kernels, each with a tight grid sized for the band only.
+            # Band-only RawKernel, as in the 10 m runs: 2 separate band kernels, each with
+            # a tight launch grid sized for its band alone.
             # Saves ~0.10 ms/step vs the full-grid ElementwiseKernel.
             _sponge_src = r"""
             extern "C" __global__
@@ -1190,7 +1246,8 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
     _ga_fused_on = ga_active and args.dtype == "float32"
     _gd_mode = 3 if (_ga_fused_on and drain_active) else 1 if _ga_fused_on else 2 if drain_active else 0
     _sp_band = bool(sponge_applies) and sponge_impl == "band"
-    if (os.environ.get("GEOSWE_DENSE_FUSE_STEP_FORCINGS", "0") == "1" and args.dtype == "float32"
+    _fuse_req = os.environ.get("GEOSWE_DENSE_FUSE_STEP_FORCINGS", "0") == "1"
+    if (_fuse_req and args.dtype == "float32"
             and not args.compressed and (_sp_band or not sponge_applies) and (_sp_band or _gd_mode)):
         from .. import rhs_cuda as _R
         _gd = None
@@ -1231,6 +1288,25 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
             + ", ".join(x for x in (("band sponge" if _sp_band else ""),
                                     {1: "Green-Ampt", 2: "drain", 3: "Green-Ampt + drain"}.get(_gd_mode, ""),
                                     ("CFL reduction" if _frc_cfl else "")) if x))
+    elif _fuse_req:
+        # Four preconditions can refuse the switch and only the taken branch logged anything, so
+        # a run could quietly lose the ~14% the 10 m runner measures: `os.environ.setdefault`
+        # arms the switch at import there, before --sponge-impl is parsed. The first two causes
+        # are the same on every rank, so rank 0 reports them; the sponge one is rank-local
+        # (sponge_applies is per-rank), so the rank that refuses says so itself, or an interior
+        # rank 0 would report "fused" while the edge ranks ran the separate kernels.
+        if args.dtype != "float32":
+            say("  ! GEOSWE_DENSE_FUSE_STEP_FORCINGS=1 not applied: the fused step is float32 "
+                "only and this run is --dtype float64; the forcings run as separate kernels")
+        elif args.compressed:
+            say("  ! GEOSWE_DENSE_FUSE_STEP_FORCINGS=1 not applied: --compressed runs the flat "
+                "step loop, which fuses its own forcings")
+        elif sponge_applies:
+            print(f"  ! rank {comm.rank}: GEOSWE_DENSE_FUSE_STEP_FORCINGS=1 not applied: this "
+                  f"rank owns a sponge edge and only the band sponge can be fused (pass "
+                  f"--sponge-impl band); its forcings run as separate kernels", flush=True)
+        # No else: with no sponge on this rank and no Green-Ampt or drain there is nothing to
+        # fuse, and a line about a switch that would change nothing is noise.
 
     # ---- Init: ring BC at t=0 ----
     # Note: the solver's `step()` calls _update_max_depth() internally, so we
@@ -1306,10 +1382,8 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         if comm.size == 1:
             full = h_loc_host
         else:
-            if nx_glob * ny_glob * 4 >= 2**31:   # raise, not assert -- assert strips under -O
-                raise RuntimeError(
-                    f"dense MPI gather of a {nx_glob}x{ny_glob} f32 field exceeds the 2GiB MPI count "
-                    f"limit; use --frame-parallel / the compressed disk-stitch path at scale")
+            # Within the 2 GiB MPI count limit: a dense MPI run too large to gather is refused
+            # at setup, before the solve, rather than here.
             parts = comm.gather(h_loc_host, root=0)
             coords_all = comm.gather((cx, cy), root=0)
             if comm.rank != 0:
@@ -1477,62 +1551,92 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         cp.get_default_memory_pool().free_all_blocks()
         if args.cache_save:
             cso.save_cache(args.cache_save)
-        cso.run(out_dir=args.out, t_end=t_end, frame_every_s=args.frame_every_s, say=say)
+        # dt_min=None (the --dt-min default of 0.0) leaves the flat loop reading its own
+        # GEOSWE_DT_MIN, so the published cached runs are untouched; a --dt-min on the command
+        # line wins over the environment, as a flag should.
+        cso.run(out_dir=args.out, t_end=t_end, frame_every_s=args.frame_every_s, say=say,
+                dt_min=(args.dt_min or None))
         return
 
-    while (args.n_steps == 0 and s.t < t_end - 1e-9) or \
-          (args.n_steps > 0 and steps < args.n_steps):
-        if args.n_steps > 0:
-            dt = 0.3
-        else:
-            if _inv_sigma_ref is not None:
-                s._storage_inv_sigma = None
-                dt_val = float(s.cfl_dt())
-                s._storage_inv_sigma = _inv_sigma_ref
+    # The progress line below is due on simulated time, so a run whose dt has collapsed prints
+    # nothing at all between 1800 s marks (measured: a 900 s window printed no progress line).
+    # A step count is the cadence that still reports while the clock crawls, and it is the same
+    # on every rank, so the comm.allreduce in the body stays collective; a wall-clock condition
+    # would fire on different ranks at different steps and deadlock on the very hang it is
+    # there to diagnose. A collapsed dt does not slow the steps themselves, so 2000 of them is
+    # seconds of wall clock at the published rates (1.24 ms per step at 10 m), while the
+    # simulated clock in the line barely moves, which is exactly what the diagnosis needs.
+    heartbeat_steps = 2000
+    try:
+        while (args.n_steps == 0 and s.t < t_end - 1e-9) or \
+              (args.n_steps > 0 and steps < args.n_steps):
+            if args.n_steps > 0:
+                dt = 0.3
             else:
-                dt_val = float(s.cfl_dt())
-            dt = min(dt_val, t_end - s.t, 1800.0)
-        s.step(dt=dt)
-        if getattr(s, "_step_forcings_done", False):
-            # sponge and GA/drain ran inside the fused step; the ring cells take theirs after the ring
-            apply_ring_bc()
-            _ring_forcings(dt)
-        else:
-            apply_sponge()
-            apply_ring_bc()
-            # GA + drain (fused when both active; otherwise separate). Matches runner
-            # order so v94 bit-exact reproducibility is possible.
-            if ga_active and args.dtype == "float32":
-                apply_infiltration(dt)
+                if _inv_sigma_ref is not None:
+                    s._storage_inv_sigma = None
+                    dt_val = float(s.cfl_dt())
+                    s._storage_inv_sigma = _inv_sigma_ref
+                else:
+                    dt_val = float(s.cfl_dt())
+                if args.dt_min > 0.0 and dt_val < args.dt_min:
+                    # Heavy rain on the narrowest storage channels can collapse dt and leave the
+                    # job grinding for a few simulated minutes until the scheduler kills it. With
+                    # a floor armed it stops here and says where it stood.
+                    raise RuntimeError(
+                        f"the CFL time step collapsed below --dt-min: dt={dt_val:.6g}s < "
+                        f"{args.dt_min:.6g}s at t={s.t:.3f}s after {steps} steps. Either the "
+                        f"state is diverging or near-dry films are driving the CFL; raise "
+                        f"--h-min-cfl, which keeps them out of the CFL and leaves the physics "
+                        f"floor --h-min alone, or lower --dt-min if this time step is expected")
+                dt = min(dt_val, t_end - s.t, 1800.0)
+            s.step(dt=dt)
+            if getattr(s, "_step_forcings_done", False):
+                # sponge and GA/drain ran inside the fused step; the ring cells take theirs after the ring
+                apply_ring_bc()
+                _ring_forcings(dt)
             else:
-                apply_drain(dt)
-        apply_clamp()
-        if _clamp_idx_fold is not None:
-            s.fold_cells_into_next_cfl(_clamp_idx_fold)
-        steps += 1
-        # Cross-section sampling
-        if cs_active and s.t >= next_cs_t - 1e-9:
-            bank_step_cs(s.t)
-            next_cs_t += args.gauge_every_s
-        # Frame writing
-        if write_frames and s.t >= next_frame_t - 1e-9:
-            write_frame(s.t)
-            next_frame_t += args.frame_every_s
-        if snaps is not None and s.t >= next_snap_t - 1e-9:
-            snaps.write(s.q, s.t)
-            next_snap_t += snap_every
-        if s.t >= next_print_t:
-            wall = time.perf_counter() - t0
-            ms_per_step = wall / max(steps, 1) * 1000
-            h_max_loc = float(cp.max(s.q[0, ngh:-ngh, ngh:-ngh]))
-            h_max_glob = (comm.allreduce(h_max_loc, op=MPI.MAX)
-                          if comm.size > 1 else h_max_loc)
-            say(f"  t={s.t/3600:.2f}h steps={steps} wall={wall:.1f}s "
-                f"ms/step={ms_per_step:.2f} h_max={h_max_glob:.2f}m")
-            next_print_t += 1800.0
-
-    if snaps is not None:
-        snaps.close()
+                apply_sponge()
+                apply_ring_bc()
+                # GA + drain (fused when both active; otherwise separate). Matches runner
+                # order so v94 bit-exact reproducibility is possible.
+                if ga_active and args.dtype == "float32":
+                    apply_infiltration(dt)
+                else:
+                    apply_drain(dt)
+            apply_clamp()
+            if _clamp_idx_fold is not None:
+                s.fold_cells_into_next_cfl(_clamp_idx_fold)
+            steps += 1
+            # Cross-section sampling
+            if cs_active and s.t >= next_cs_t - 1e-9:
+                bank_step_cs(s.t)
+                next_cs_t += args.gauge_every_s
+            # Frame writing
+            if write_frames and s.t >= next_frame_t - 1e-9:
+                write_frame(s.t)
+                next_frame_t += args.frame_every_s
+            if snaps is not None and s.t >= next_snap_t - 1e-9:
+                snaps.write(s.q, s.t)
+                next_snap_t += snap_every
+            _due = s.t >= next_print_t
+            if _due or steps % heartbeat_steps == 0:
+                wall = time.perf_counter() - t0
+                ms_per_step = wall / max(steps, 1) * 1000
+                h_max_loc = float(cp.max(s.q[0, ngh:-ngh, ngh:-ngh]))
+                h_max_glob = (comm.allreduce(h_max_loc, op=MPI.MAX)
+                              if comm.size > 1 else h_max_loc)
+                say(f"  t={s.t/3600:.2f}h steps={steps} wall={wall:.1f}s "
+                    f"ms/step={ms_per_step:.2f} h_max={h_max_glob:.2f}m dt={dt:.4f}s")
+                if _due:
+                    next_print_t += 1800.0
+    finally:
+        # Even when the loop raises: close() writes snapshots_t.npy and shortens snapshots.npy
+        # to the frames actually taken, so a diverging run leaves a readable pair instead of a
+        # file of trailing zeros with no time axis beside it. A failure inside close() chains
+        # onto whatever the loop raised, so the first cause stays visible.
+        if snaps is not None:
+            snaps.close()
     wall_total = time.perf_counter() - t0
     say(f"Done. {steps} steps in {wall_total:.1f}s "
         f"({wall_total/max(steps,1)*1000:.2f} ms/step avg)")
@@ -1549,11 +1653,8 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         out_max = max_h_host
         out_h = h_final_host
     else:
-        # Gather all ranks
-        if nx_glob * ny_glob * 4 >= 2**31:   # raise, not assert -- assert strips under -O
-            raise RuntimeError(
-                f"dense MPI gather of a {nx_glob}x{ny_glob} f32 field exceeds the 2GiB MPI count limit; "
-                f"use --frame-parallel / the compressed disk-stitch path at scale")
+        # Gather all ranks (within the 2 GiB MPI count limit: a dense MPI run too large for
+        # these two gathers is refused at setup, before the solve).
         max_all = comm.gather(max_h_host, root=0)
         h_all = comm.gather(h_final_host, root=0)
         coords_all = comm.gather((cx, cy), root=0)
@@ -1573,6 +1674,19 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         ny_orig = case["bed"].shape[1]
         out_max = out_max[:nx_orig, :ny_orig]
         out_h = out_h[:nx_orig, :ny_orig]
+        # write_geotiff replaces a NaN with the -9999 nodata value, so a diverged state would be
+        # published as "no data", indistinguishable from outside the domain, and the run would
+        # still exit 0. Measured with --n-steps, whose fixed dt=0.3 never consults the CFL, on a
+        # grid that cannot take it: 43.9% of final_depth.tif came back as nodata while the run
+        # reported "global max_h=8.0e37m". One host pass over the two fields, once per run.
+        for _nm, _fld in (("max_depth", out_max), ("final_depth", out_h)):
+            _nbad = int((~np.isfinite(_fld)).sum())
+            if _nbad:
+                raise RuntimeError(
+                    f"{_nm} holds {_nbad:,} non-finite cells of {_fld.size:,}: the run diverged, "
+                    f"so no raster is written (a NaN would be stored as the -9999 nodata value "
+                    f"and read as dry). With --n-steps the fixed dt=0.3 ignores the CFL, so drop "
+                    f"it and let the solver pick dt; otherwise check the forcings and the bed")
         write_geotiff(os.path.join(args.out, "max_depth.tif"),
                        GeoArray(out_max, dx, dx, x0, y0, crs_wkt),
                        dtype="float32", nodata=-9999.0)

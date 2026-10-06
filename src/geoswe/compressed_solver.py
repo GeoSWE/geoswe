@@ -595,9 +595,10 @@ class CompressedStepper:
         self.kern_bedgrad = build_flat_bedgrad_kernel() if self._pg else None
         self._gxb = None; self._gyb = None; self._gb_key = None
         # SWE_FLAT_REGULAR_FASTPATH=1: cells whose four neighbours sit at the canonical
-        # row-major offsets skip the 8 B/cell int16 table read entirely (flag = bit 2 of
-        # is_active, already in a register). Irregular cells fall back to the table, so
-        # the result is bit-identical on any mesh.
+        # row-major offsets skip the 8 B/cell int16 table read entirely (flag = bit 6 of
+        # is_active, already in a register; bits 2 and 3 are the stronger 2-hop predicate
+        # below). Irregular cells fall back to the table, so the result is bit-identical
+        # on any mesh.
         self._reg = regular_fastpath_enabled()
         self.kern_rhs_pgreg = None
         # SWE_FLAT_REG2=1: kill the +/-2 dependent gather chain by ARITHMETIC on cells
@@ -1146,15 +1147,29 @@ class CompressedHalo:
         """One-time collective check that each neighbor agrees on the perpendicular
         dense-buffer width P. A mismatch (non-square partition / tiling off-by-one) would
         silently shift the halo. Non-periodic Cart -> each nbr is a unique symmetric pair,
-        so the default-tag sendrecv pairs correctly."""
+        so the default-tag sendrecv pairs correctly.
+
+        Every face is exchanged before anything is raised, and the verdict is reduced with
+        MAX: raising inside the loop skipped this rank's remaining sendrecv calls, and the
+        neighbour waiting on one of them blocked here, inside the check, until the job's
+        wall clock ran out. Every rank raises instead, each naming its own faces.
+        """
         MPI = self.MPI
+        bad = []
         for f in self.faces:
             if f["nbr"] == MPI.PROC_NULL:
                 continue
             their_P = self.comm.sendrecv(int(f["P"]), dest=f["nbr"], source=f["nbr"])
             if their_P != int(f["P"]):
-                raise RuntimeError(f"halo P mismatch with rank {f['nbr']}: local P={f['P']} != "
-                                   f"neighbor P={their_P} -- partition/tiling misaligned")
+                bad.append(f"rank {int(f['nbr'])} (local P={int(f['P'])} != "
+                           f"neighbour P={their_P})")
+        if not self.comm.allreduce(1 if bad else 0, MPI.MAX):
+            return
+        raise RuntimeError(
+            "halo P mismatch -- partition/tiling misaligned: "
+            + ("; ".join(bad) if bad else "this rank's faces all agree, another rank's do not")
+            + ". The ranks that name a neighbour are the misaligned pair; rebuild the cache "
+              "for this rank count, or fix the rank-to-block mapping.")
 
     def exchange(self, q0, q1, q2):
         """Exchange the ngh boundary ROWS densely (fixed ngh x perp size, always
@@ -1477,8 +1492,25 @@ def _write_depth_tifs(out_dir, *, max_h_flat, q0, ij_active, nxp, nyp, ngh, nx_g
     else:
         rank = comm.rank
         tmp = os.path.join(out_dir, f"_depth_r{rank:02d}.npz")
-        np.savez(tmp, i0=np.int64(i0), j0=np.int64(j0), **{f: loc[f] for f in fields})
+        # A failed write (out of space, read-only scratch) used to raise here on one rank
+        # while the others were already inside the Barrier below, where they held the whole
+        # allocation until the wall clock. Write, then reduce the verdict with MAX so every
+        # rank raises; the Barrier the stitch needs anyway is the one every rank reaches.
+        _err = ""
+        try:
+            np.savez(tmp, i0=np.int64(i0), j0=np.int64(j0), **{f: loc[f] for f in fields})
+        except Exception as _exc:
+            _err = f"{type(_exc).__name__}: {_exc}"
         comm.Barrier()
+        from mpi4py import MPI as _M
+        if comm.allreduce(1 if _err else 0, _M.MAX):
+            raise RuntimeError(
+                f"rank {rank}: the per-rank depth shard {tmp} "
+                + (f"could not be written ({_err})" if _err
+                   else "was written, but another rank's was not")
+                + f" -- {' + '.join(fname[f] for f in fields)} cannot be stitched. Check the "
+                  f"free space and the permissions on the output directory, then rerun from "
+                  f"the last checkpoint.")
         if rank != 0:
             return
         out = {f: np.full((nx_glob, ny_glob), -9999.0, np.float32) for f in fields}
@@ -1504,12 +1536,13 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
                drain=None, infil=None, ga_drain=None, clamp=None, cross_sections=None,
                max_depth=False, gauge_every_s=360.0, nx_orig=None, ny_orig=None,
                checkpoint_every_s=0.0, ckpt_dir=None, resume=False, max_wall_s=0.0,
-               stop_at_epoch=0.0, say=print, bench=False, inflows=None):
+               stop_at_epoch=0.0, say=print, bench=False, inflows=None, dt_min=None):
     """The flat per-step loop. All inputs are flat (N_stored,) device arrays +
     precomputed forcing bundles. Writes frames_parallel/ for animate_parallel.
     `mpi` (dict: comm, halo, i0, j0, nx_loc, ny_loc) enables multi-GPU.
     checkpoint_every_s>0 dumps (q0,q1,q2,t,step) to ckpt_dir every interval (atomic);
-    resume=True restarts from ckpt_dir/ckpt_meta.json -> survives server timeouts."""
+    resume=True restarts from ckpt_dir/ckpt_meta.json -> survives server timeouts.
+    dt_min (default GEOSWE_DT_MIN, 0 = off) raises when the CFL step collapses below it."""
     nx, ny = nxp - 2*ngh, nyp - 2*ngh
     act = st.is_active
     halo = mpi["halo"] if mpi else None
@@ -1788,13 +1821,25 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
         # detect a TORN multi-rank checkpoint (a kill between per-rank
         # publishes leaves mixed-epoch slabs under one meta). Each npz carries
         # its own (t, steps) stamp; every rank must match the meta.
-        if "t" in z.files:
-            _zt, _zs = float(z["t"]), int(z["steps"])
-            if abs(_zt - float(mck["t"])) > 1e-9 or _zs != int(mck["steps"]):
-                raise RuntimeError(
-                    f"rank {rank}: checkpoint slab is at t={_zt:.3f}s/step {_zs} but "
-                    f"meta says t={float(mck['t']):.3f}s/step {int(mck['steps'])} -- torn "
-                    f"checkpoint (kill mid-publish); restore a consistent set before resuming")
+        _stamp = (float(z["t"]), int(z["steps"])) if "t" in z.files else None
+        _torn = _bad = _stamp is not None and (abs(_stamp[0] - float(mck["t"])) > 1e-9
+                                               or _stamp[1] != int(mck["steps"]))
+        # A torn set is torn on SOME ranks: the ones whose slab does match the meta would
+        # resume and then block in the loop's first dt allreduce for the rest of the job,
+        # with nothing in the log but one rank's traceback. Reduce the verdict so all of
+        # them raise. Outside the stamp test on purpose: a mixed-vintage set (one slab from
+        # the older, unstamped format) would otherwise post this collective on a subset.
+        if comm is not None:
+            _torn = bool(comm.allreduce(int(_bad), _MPI.MAX))
+        if _torn:
+            raise RuntimeError(
+                f"rank {rank}: checkpoint slab is at "
+                + (f"t={_stamp[0]:.3f}s/step {_stamp[1]}" if _stamp is not None
+                   else "no (t, steps) stamp, an older checkpoint format")
+                + f", meta says t={float(mck['t']):.3f}s/step {int(mck['steps'])}"
+                + ("" if _bad else " (this slab agrees; another rank's does not)")
+                + " -- torn checkpoint (kill mid-publish); restore a consistent set before "
+                  "resuming")
         # restore per-cell state; refuse a physics-wrong silent reset.
         if ga_drain_on:
             if "F" in z.files:
@@ -1890,6 +1935,25 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
     if bench:   # benchmark: per-step cudaEvent (GPU-compute) + wall; default off -> byte-identical
         _bev0 = cp.cuda.Event(); _bev1 = cp.cuda.Event(); _bench_gpu_ms = 0.0
     _next_print = 1800.0   # sim-time progress cadence when frames are OFF (else the frame log covers it)
+    _last_log_step = steps   # step of the last progress line, for the heartbeat in the loop
+    # Both progress lines in the loop are gated on SIMULATED time, so the number of steps
+    # between two of them is unbounded: the documented sub-grid-storage stall (heavy rain on
+    # the narrowest channels, benchmark/pinellas_10m/README.md) collapses dt and the run then
+    # says nothing at all. The heartbeat reports a run that has gone this many steps with no
+    # progress line, so it is silent on a run that reports normally. Gated on the STEP COUNT,
+    # never on the wall clock: its body reduces h_max across ranks, and a wall-clock
+    # condition fires on different ranks at different steps, which deadlocks on the exact
+    # hang it is there to diagnose (the wall-limit check below is the template: steps % 50,
+    # then an allreduce).
+    _hb_steps = int(os.environ.get("GEOSWE_HEARTBEAT_STEPS", "20000") or 0)
+    # dt floor: a collapsed step otherwise grinds on to the job's wall clock having advanced
+    # nothing. Checked just before t advances, the one point where this step's dt is final on
+    # every path (the async reduction resolves it in the middle of the step), and against the
+    # CFL dt rather than the step taken, which the t_end clip legitimately shortens on the
+    # last step. The CFL dt is reduced across ranks, so every rank trips on the same step.
+    if dt_min is None:
+        dt_min = float(os.environ.get("GEOSWE_DT_MIN", "0") or 0)
+    dt_min = float(dt_min)
     # Optional phase profiler (SWE_PROFILE=N: sync+time each phase for N steps after a
     # 300-step warmup, then print). The per-phase syncs serialize the pipeline, so the
     # profiled TOTAL is inflated vs the real ms/step -- use the RELATIVE breakdown.
@@ -2236,6 +2300,15 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
             _ov = q0 > cp.float32(_hcap)                      # (capping h alone inflates u=hu/h -> worse CFL)
             q0[_ov] = cp.float32(_hcap); q1[_ov] = cp.float32(0.0); q2[_ov] = cp.float32(0.0)
         _ph("forcings", _t0, _PA)
+        if dt_min > 0.0 and _cached_dt is not None and _cached_dt < dt_min:
+            raise RuntimeError(
+                f"the time step collapsed to {_cached_dt:.6g}s, below dt_min={dt_min:g}s, at "
+                f"t={t:.3f}s (step {steps}): finishing this run would take "
+                f"{(t_end - t)/max(_cached_dt, 1e-12):.3g} more steps. A thin film over a "
+                f"narrow sub-grid channel does this; raise the CFL's own wet-depth floor "
+                f"(SWE_HMIN_CFL=1e-3; the dense --h-min-cfl flag does not reach this loop), "
+                f"which leaves the physics floor h_min alone, or lower the storage Courant "
+                f"number.")
         t += dt; steps += 1
         if bench:   # GPU-compute window = cfl+halo+rhs+forcings (excludes frame/print/ckpt, which are off in bench)
             _bev1.record(); _bev1.synchronize()
@@ -2263,7 +2336,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
                 _fb, _tb = cp.cuda.runtime.memGetInfo()
                 say(f"  [compressed] frame {fidx} t={t/3600:.4f}h ({int(round(t))}s) steps={steps} "
                     f"ms/step={wall/max(steps-_steps0,1)*1e3:.2f} h_max={hm:.3f}m dt={dt:.4f}s GPU={(_tb-_fb)/1024**2:.0f}MiB")
-            fidx += 1; next_frame += frame_every_s; _last_ft = t
+            fidx += 1; next_frame += frame_every_s; _last_ft = t; _last_log_step = steps
         if (not _frames_on) and t >= _next_print:            # progress when frames are off (e.g. scoring runs)
             hm = _interior_hmax(q0)
             if comm is not None:
@@ -2273,7 +2346,22 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
                 say(f"  [compressed] t={t/3600:.2f}h steps={steps} "
                     f"ms/step={wall/max(steps-_steps0,1)*1e3:.2f} h_max={hm:.3f}m dt={dt:.4f}s "
                     f"GPU={(lambda fb,tb:(tb-fb)/1024**2)(*cp.cuda.runtime.memGetInfo()):.0f}MiB")
-            _next_print += 1800.0
+            _next_print += 1800.0; _last_log_step = steps
+        # Heartbeat: the progress lines above are gated on simulated time, so a run whose dt
+        # has collapsed prints nothing. This one is gated on the step count (see above: the
+        # body is collective, so a wall-clock gate would deadlock), and stays quiet while the
+        # lines above keep coming. No "ms/step=" in the text: run_cache_3m.py publishes the
+        # LAST run.log line holding that substring as the measured per-step cost.
+        if _hb_steps and steps - _last_log_step >= _hb_steps:
+            hm = _interior_hmax(q0)
+            if comm is not None:
+                hm = comm.allreduce(hm, _MPI.MAX)
+            if rank == 0:
+                say(f"  [heartbeat] steps={steps} t={t/3600:.4f}h dt={dt:.4g}s h_max={hm:.3f}m "
+                    f"wall={time.perf_counter()-wall0:.0f}s -- {steps - _last_log_step} steps "
+                    f"with no progress line; a collapsing dt stalls like this "
+                    f"(GEOSWE_DT_MIN=<s> stops the run instead)")
+            _last_log_step = steps
         if t >= next_ckpt - 1e-9:
             save_ckpt(); next_ckpt += checkpoint_every_s
         elif _ckpt_writer[0] is not None and steps % 50 == 0:
@@ -2460,9 +2548,26 @@ class _RainRowWindow:
 
 def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.5, h_min=1e-6,
                g=9.81, comm=None, checkpoint_every_s=0.0, ckpt_dir=None, resume=False,
-               max_wall_s=0.0, stop_at_epoch=0.0, say=print, bench=False):
+               max_wall_s=0.0, stop_at_epoch=0.0, say=print, bench=False, dt_max=None,
+               dt_min=None):
     """Load the flat cache straight to GPU (no dense domain) and run the loop.
-    Under MPI (comm.size>1) each rank loads cache_dir/r<rank>/ and rebuilds its halo."""
+    Under MPI (comm.size>1) each rank loads cache_dir/r<rank>/ and rebuilds its halo.
+
+    ``dt_max`` caps the time step, in seconds. Unlike :meth:`CompressedSolver.run` this
+    path applies no rain cap of its own: the published cached benchmark replays with rain,
+    and the cap would change its step schedule. Without one, rain on a dry bed takes the
+    dry-partition CFL step, 478.9 s at dx = 3 m, and lays that whole interval of rain down
+    in one go. Pass ``dt_max="rain"`` for the same film bound :meth:`CompressedSolver.run`
+    applies (27.4 s on that grid at 40 mm/h), or a number for a cap of your own. That
+    bound is read from the rain table in the cache, so the ``GEOSWE_RAIN_NPZ`` and
+    ``GEOSWE_RAIN_UNIFORM_MMHR`` overrides, which the loop applies afterwards, do not move
+    it; pass the cap as a number when you replay another deck through them.
+    ``dt_min`` raises when the step collapses below it, instead of grinding on to the job's
+    wall clock; it defaults to ``GEOSWE_DT_MIN`` (0 = off). ``say=None`` gives a silent run,
+    as in :meth:`CompressedSolver.run`.
+    """
+    if say is None:        # the sibling entry point installs a no-op for this; it used to
+        say = lambda *a, **k: None      # die here with TypeError: 'NoneType' is not callable
     t0 = time.perf_counter()
     rank = comm.rank if comm is not None else 0
     # a per-rank cache can only run on the rank count it was built for
@@ -2497,7 +2602,8 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
         return cp.asarray(a)
     _nbr_host = np.load(os.path.join(cache_dir, "nbr.npy"))       # HOST: int16 deltas (new) or int32 abs (old)
     if _nbr_host.dtype != np.int16:                               # convert on HOST (2TB RAM) -> GPU never
-        _nbr_host = nbr_to_int16_delta(_nbr_host)                 # holds the int32 / int64-intermediate transient
+        _nbr_host = nbr_to_int16_delta(                           # holds the int32 / int64-intermediate transient
+            _nbr_host, where=os.path.join(cache_dir, "nbr.npy"))  # name the file: no mask here to screen
     nbr = cp.asarray(_nbr_host); del _nbr_host                    # GPU gets ONLY the int16 table (3.55 GB)
     is_active = ld("is_active")
     ij_active = np.load(os.path.join(cache_dir, "ij_active.npy"))  # HOST: only save_frame + interior-mask read it
@@ -2638,6 +2744,29 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
     _cfl_linf = os.environ.get("SWE_CFL_LINF", "0") not in ("0", "", "false", "False")
     st = CompressedStepper(N=N, nbr=nbr, is_active=is_active, g=g, h_min=h_min, dx=dx, cfl=cfl,
                            no_sigma=no_sigma, cfl_linf=_cfl_linf)
+    # Rain on a dry bed: no wave speed limits the step, so CompressedSolver.run bounds it by
+    # the CFL step of the film the rain lays down. A replay does NOT do that unless asked:
+    # the published cached benchmark has rain, and the bound would change its step schedule
+    # (measured at dx=3 m, 40 mm/h: a 478.9 s first step becomes 27.4 s).
+    if isinstance(dt_max, str):
+        if dt_max != "rain":
+            raise ValueError(f"run_cached: dt_max={dt_max!r} -- pass the cap in seconds, or "
+                             f'"rain" for the rain-film bound CompressedSolver.run applies')
+        if comm is not None and comm.size > 1:
+            raise ValueError(
+                'run_cached: dt_max="rain" is single-rank only. Each rank holds its own '
+                'slice of the rain table, so the bound would differ by rank and the ranks '
+                'would take different steps; pass the same number of seconds on every rank.')
+        dt_max = None
+        _rmax = float(rain["native_rate_dev"].max()) if rain is not None else 0.0
+        if _rmax > 0.0:
+            dt_max = (cfl * dx) ** (2.0 / 3.0) / (g * _rmax) ** (1.0 / 3.0)
+            if rank == 0:
+                say(f"  [cache] dt_max={dt_max:.2f}s from the cached rain table "
+                    f"(max rate {_rmax*3.6e6:.1f} mm/h)")
+        elif rank == 0:
+            say('  [cache] dt_max="rain": this cache holds no rain, so no cap applies')
+    st.dt_max = dt_max
     _t_load = time.perf_counter() - t0
     _r = _step_loop(st, q0=q0, q1=q1, q2=q2, bed_f=bed_f, sig_f=sig_f, mcls_f=mcls_f,
                       m_tab=m_tab, inv_sig_f=inv_sig_f, ij_active=ij_active, nxp=nxp, nyp=nyp,
@@ -2648,7 +2777,7 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
                       resume=resume, max_wall_s=max_wall_s, stop_at_epoch=stop_at_epoch, say=say,
                       nx_orig=meta["nx_glob"], ny_orig=meta["ny_glob"],   # MPI depth-tif stitch must cover the GLOBAL grid; without this nx_orig/ny_orig default to the LOCAL interior (nxp-2ngh) and the stitched tif gets clipped to one rank's slab
                       max_depth=bench, bench=bench,
-                      ring_stage=_ring_stage, ring_extrap=_ring_extrap,
+                      ring_stage=_ring_stage, ring_extrap=_ring_extrap, dt_min=dt_min,
                       inflows=inflows)   # bench -> enable final-field save + per-step cudaEvent
     if bench and rank == 0:   # augment the loop's bench json with the cache LOAD time
         _btp = os.path.join(out_dir, "bench_timings.json")
@@ -2717,6 +2846,13 @@ class CompressedSolver:
         uses the dense solver's velocity norm, ``max(|u|, |v|)``, in the time step,
         so that a compressed run takes the dense run's steps. Rainfall and the other
         forcings are not copied from ``s``; attach them with the ``set_*`` methods.
+
+        ``m_cls_xp`` (the Manning class of every cell) is on the **padded** grid,
+        ``(nx + 2*ngh, ny + 2*ngh)``, the shape of ``s.q[0]``, not the interior
+        ``(nx, ny)``; ``m_tab_xp`` is the class table it indexes. The packing gather is
+        a CuPy fancy index, which wraps an out-of-range index instead of raising, so an
+        interior-shaped field would be gathered from the wrong cells; the shape is
+        therefore checked (:meth:`geoswe.compressed_mesh.CompressedMesh2D.pack`).
         """
         from .mesh import Mesh2D
         from .compressed_rhs import CompressedSWE
@@ -2742,6 +2878,13 @@ class CompressedSolver:
         ny_glob = s.mesh.ny if ny_glob is None else ny_glob
         if m_cls_xp is None or m_tab_xp is None:
             m_cls_xp, m_tab_xp = _manning_table_of(s)
+        elif getattr(s, "q", None) is not None:
+            # Spelled out by the caller (the run driver does), so it never passed through
+            # Solver2D.set_manning_table and its guards. Same kernel, same hazards: an
+            # out-of-range class id is an out-of-bounds read in the friction kernel.
+            from .solver import check_manning_table
+            check_manning_table(m_cls_xp, m_tab_xp, tuple(s.q.shape[1:]),
+                                who="CompressedSolver.from_dense(m_cls_xp=...)")
         if s.inside_mask is None:               # no mask: keep every cell
             s.set_inside_mask(cp.ones((s.mesh.nx, s.mesh.ny), dtype=bool))
         # One scheme, and only one: the flat kernel builds first-order SRM-HLLC face
@@ -2926,6 +3069,13 @@ class CompressedSolver:
     def set_ring(self, ring):
         self._require_unbuilt("set_ring");     self._ring_raw = ring;     return self
     def set_sponge(self, sponge):
+        """Attach the open-boundary sponge the run driver builds: ``{"keep": k, "amb": a}``,
+        two fields on the **padded** grid (the shape of ``s.q[0]``, not the interior
+        ``(nx, ny)``). Each step relaxes the band toward the open-ocean state,
+        ``h <- keep*h + amb`` with ``hu, hv <- keep*hu, keep*hv``, so ``keep = 1`` and
+        ``amb = 0`` leave a cell alone. The driver sets ``keep = 1 - alpha`` over the
+        band and ``amb = alpha`` times the ambient still-water depth, which pulls the
+        band toward that depth and absorbs the outgoing wave. ``None`` for no sponge."""
         self._require_unbuilt("set_sponge");   self._sponge_raw = sponge; return self
     def set_rain(self, rain):
         """Attach rainfall: a :class:`~geoswe.RainfallForcing` (uniform, or one
@@ -3102,7 +3252,7 @@ class CompressedSolver:
 
     def run(self, t_end=None, *, out_dir=None, frame_every_s=0.0, checkpoint_every_s=0.0,
             ckpt_dir=None, resume=False, max_wall_s=0.0, stop_at_epoch=0.0, say=print,
-            dt_max=None):
+            dt_max=None, dt_min=None):
         """Time-step the compressed mesh from ``t = 0`` to ``t_end``.
 
         Writes depth frames every ``frame_every_s`` of simulated time into ``out_dir``
@@ -3112,8 +3262,18 @@ class CompressedSolver:
         With no ``out_dir`` nothing is written; read the result with :meth:`depth`.
         ``dt_max`` caps the time step. On one rank, rain also keeps the step below
         the CFL step of the film it lays down, as in :meth:`geoswe.Solver2D.run`, so
-        rain on a dry bed is not deposited minutes at a time. ``say=None`` gives a
-        silent run.
+        rain on a dry bed is not deposited minutes at a time. ``dt_min`` raises when the
+        step collapses below it rather than grinding on to the job's wall clock (default
+        ``GEOSWE_DT_MIN``, 0 = off). ``say=None`` gives a silent run.
+
+        The frames are **not** GeoTIFFs. Each is one compressed ``.npz`` per rank,
+        ``<out_dir>/frames_parallel/depth_<index:05d>_t<seconds:07d>_r<rank:02d>.npz``,
+        holding a single array ``h``: that rank's interior subdomain of the depth field,
+        float16 by default (a 0.008 m step at a depth of 10 m), or float32 with
+        ``SWE_FRAME_FP32=1``. ``frames_parallel/manifest.json``, written beside them,
+        carries the grid, the CRS and each rank's ``(i0, j0, nx, ny)`` offsets, which is
+        the only way to place the shards back on the global grid; no reader for the format
+        ships with the library. ``enable_max_depth`` writes GeoTIFFs instead.
         """
         if t_end is None:
             raise TypeError("CompressedSolver.run() needs t_end, the end time in seconds")
@@ -3132,7 +3292,8 @@ class CompressedSolver:
                 return self.run(t_end, out_dir=_tmp, frame_every_s=0.0,
                                 checkpoint_every_s=checkpoint_every_s, ckpt_dir=ckpt_dir,
                                 resume=resume, max_wall_s=max_wall_s,
-                                stop_at_epoch=stop_at_epoch, say=say, dt_max=dt_max)
+                                stop_at_epoch=stop_at_epoch, say=say, dt_max=dt_max,
+                                dt_min=dt_min)
             finally:
                 shutil.rmtree(_tmp, ignore_errors=True)
         if ckpt_dir is None and (checkpoint_every_s or resume or max_wall_s or stop_at_epoch):
@@ -3180,7 +3341,7 @@ class CompressedSolver:
                           gauge_every_s=self.gauge_every_s, nx_orig=self.nx_orig, ny_orig=self.ny_orig,
                           checkpoint_every_s=checkpoint_every_s, ckpt_dir=ckpt_dir,
                           resume=resume, max_wall_s=max_wall_s, stop_at_epoch=stop_at_epoch, say=say,
-                          inflows=getattr(self, "_inflows", None))
+                          dt_min=dt_min, inflows=getattr(self, "_inflows", None))
 
 
 def run_fullrun(*, s, ngh, dx, cfl, h_min, g, m_cls_xp, m_tab_xp,

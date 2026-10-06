@@ -190,11 +190,17 @@ def build_flat_srm_hllc_gathered_kernel(dtype=cp.float32, no_sigma=False):
     return raw_kernel(s, kname)
 
 
-def nbr_to_int16_delta(nbr_abs):
+def nbr_to_int16_delta(nbr_abs, where=""):
     """(N,4) int32 absolute neighbor flat-ids -> (N,4) int16 DELTAS (id = k+delta;
-    -32768 = no neighbor). Halves the nbr table. Valid only if |delta| < 32768, which
-    holds for the row-major stored layout (the row-jump neighbor delta ~= a row's cell
-    count); the assert guards against a future grid where it doesn't (e.g. CONUS)."""
+    -32768 = no neighbor). Halves the nbr table.
+
+    Valid only if |delta| < 32768. In the row-major stored layout the row-jump delta is
+    the cells of one padded row at or past column j plus the cells of the next row below
+    it, which is at most one row's width: a rank whose padded rows stay under 32768 cells
+    can never overflow, and a wider one can (a 1 m CONUS strip, say). ``CompressedSWE``
+    screens the mask for that width before this table is built, so reaching the raise
+    below means an unscreened caller. ``where`` names the table's source in the message.
+    """
     xp = cp if isinstance(nbr_abs, cp.ndarray) else np
     N = nbr_abs.shape[0]
     # chunked: the whole-array int64 where()/astype transient is ~32 B/cell each
@@ -218,8 +224,13 @@ def nbr_to_int16_delta(nbr_abs):
     # would WRAP in the int16 cast -> wrong neighbor indirection, silently).
     if not (_dmax < 32768 and _dmin > -32768):
         raise ValueError(
-            f"nbr delta out of int16 range (min {_dmin}, max {_dmax}); "
-            f"raise to int32 or re-partition")
+            f"neighbour delta out of int16 range (min {_dmin}, max {_dmax})"
+            + (f" in {where}" if where else "")
+            + ": a stored row spans more than 32768 cells. int32 is not a way out, the "
+            "flat kernels declare `const short*` for this table. Split the domain along "
+            "the contiguous y axis so each rank's padded rows stay under 32768 cells "
+            "(--balanced-partition splits on y; one 32000-cell strip per rank is what the "
+            "billion-cell runs use), or coarsen the grid.")
     return xp.ascontiguousarray(out)
 
 
@@ -238,6 +249,7 @@ class CompressedSWE:
             raise ImportError("the compressed mesh needs SciPy to dilate the active mask "
                               "(it comes with the gpu extra): pip install scipy") from exc
         self.stored = binary_dilation(self.inside, iterations=ring)
+        self._screen_row_width()                               # before the (N,4) table, see below
         self.cm = CompressedMesh2D(mesh, self.stored)          # flat over stored set
         ngh = mesh.ngh
         nxp, nyp = self.cm.nxp, self.cm.nyp
@@ -250,6 +262,45 @@ class CompressedSWE:
         # verify every true-active cell has all +/-1,+/-2 neighbors stored (no OOB / no
         # ghost-fallback) -> guarantees bit-identical to dense at active cells.
         self._verify()
+
+    def _screen_row_width(self):
+        """Refuse a stored mask too wide for the int16 neighbour deltas, before the table.
+
+        The flat order is row-major, so the row-jump delta from (i, j) is the stored cells
+        of row i at column >= j plus the stored cells of row i+1 below column j: two
+        disjoint column ranges, so the delta is at most one row's width. A mask under
+        32768 columns therefore cannot overflow, which is the free test below, and only a
+        wider grid pays for the exact per-row-pair pass. Either way it beats the check
+        inside nbr_to_int16_delta, which only sees the finished (N, 4) int32 table
+        (16 B/cell, minutes of build per billion cells, all of it wasted).
+
+        Screening on (rows[:-1] + rows[1:]).max() instead would overestimate by up to 2x
+        and reject the 32000-cells-per-rank strip the billion-cell weak-scaling runs use.
+        """
+        st = self.stored
+        if st.shape[1] < 32768:        # no row can be wider than the grid itself
+            return
+        worst = 0
+        ROWS = max(2, (1 << 23) // max(st.shape[1], 1))     # ~8M cells of int32 per block
+        for r0 in range(0, max(st.shape[0] - 1, 0), ROWS - 1):
+            blk = st[r0:r0 + ROWS]
+            if blk.shape[0] < 2:
+                break
+            pre = np.cumsum(blk, axis=1, dtype=np.int32) - blk   # stored cells before column j
+            cnt = pre[:, -1] + blk[:, -1]                        # stored cells of the whole row
+            d = cnt[:-1, None] - pre[:-1] + pre[1:]              # the +i row-jump delta
+            both = blk[:-1] & blk[1:]                            # where that neighbour exists
+            if both.any():
+                worst = max(worst, int(d[both].max()))
+        if worst >= 32768:
+            raise ValueError(
+                f"this rank's stored mask needs neighbour deltas up to {worst}, past the "
+                f"32767 the flat kernels can address (they declare `const short*` for the "
+                f"neighbour table, so int32 is not a way out). The grid is "
+                f"{int(st.shape[1])} columns wide: split the domain along the contiguous y "
+                f"axis so each rank's rows stay under 32768 cells (--balanced-partition "
+                f"splits on y; one 32000-cell strip per rank is what the billion-cell runs "
+                f"use), or coarsen the grid.")
 
     def _verify(self):
         nb = self.cm.neighbors
@@ -427,21 +478,13 @@ def build_flat_srm_hllc_kernel_pg(dtype=cp.float32, no_sigma=False):
 # fall back to the table, so the result is bit-identical on any mesh; the
 # benchmark's everywhere-wet domain is 100% regular, a real domain is regular in
 # the interior of every active region.
+#
+# CompressedStepper._mark_regular sets bit 6, from the per-axis canonical bits that
+# flat_mark_canon writes below ((is_active & 48) == 48 -> |= 64). A second marking
+# kernel used to live here and OR bit 2 instead, which is the stronger 2-hop
+# predicate: unreachable, but it would have promoted cells the 2-hop arithmetic
+# cannot address. Deleted rather than repaired, there being one live marker.
 # ---------------------------------------------------------------------------
-_MARK_REGULAR_SRC = r"""
-extern "C" __global__
-void flat_mark_regular(const short* __restrict__ nbr, unsigned char* __restrict__ is_active,
-                       const int N, const int stride)
-{
-    const int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= N) return;
-    if (is_active[k] == 0) return;
-    const long long k4 = (long long)k * 4;
-    const bool reg = (nbr[k4+0] == (short)stride) && (nbr[k4+1] == (short)(-stride))
-                  && (nbr[k4+2] == (short)1)      && (nbr[k4+3] == (short)(-1));
-    if (reg) is_active[k] = (unsigned char)(is_active[k] | 4);
-}
-"""
 
 # preamble-B with the regular fast path, on top of the precomputed-gradient variant
 _PRE_B_FLAT_PG_REG = (
@@ -464,10 +507,6 @@ _PRE_B_FLAT_PG_REG = (
 def regular_fastpath_enabled():
     return (os.environ.get("SWE_FLAT_REGULAR_FASTPATH", "0") == "1"
             and bedgrad_precomp_enabled())
-
-
-def build_flat_mark_regular_kernel():
-    return raw_kernel(_MARK_REGULAR_SRC, "flat_mark_regular")
 
 
 def build_flat_srm_hllc_kernel_pg_reg(stride, dtype=cp.float32, no_sigma=False):
@@ -503,9 +542,10 @@ def build_flat_srm_hllc_kernel_pg_reg(stride, dtype=cp.float32, no_sigma=False):
 # themselves canonical ("reg2"), the 2-hop ids are pure arithmetic -- k +/- 2*S
 # and k +/- 2 -- exactly as in the dense layout. No table read, no chain, and no
 # extra array. Cells that fail the test take the original chained path, so the
-# result is bit-identical on any mesh. Flag = bit 3 (value 8) of is_active,
-# already resident in a register; bit 2 (value 4) is the 1-hop predicate it is
-# built from.
+# result is bit-identical on any mesh. Flags = bit 2 (value 4) on x and bit 3
+# (value 8) on y, already resident in a register; they are built from the per-axis
+# 1-hop predicates bit 4 (value 16, x) and bit 5 (value 32, y), which pass 1 below
+# writes. Bit 6 is the 1-hop-regular flag of the variant above, a weaker property.
 # ---------------------------------------------------------------------------
 _MARK_REGXY_SRC = r"""
 // pass 1: per-axis canonical test  -> bit 4 (x), bit 5 (y)

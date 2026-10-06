@@ -110,6 +110,32 @@ print("OK")
 '''
 
 
+_SCRIPT_FUSED_FORCINGS = _PRELUDE + r'''
+# GEOSWE_DENSE_FUSE_STEP_FORCINGS=1 moves the sponge and the Green-Ampt/drain terms inside
+# the dense fused step, which docs/configuration.md calls bit-identical. Both are active on
+# this case (an 8-cell sponge and GA on by default), and the kernel variants this selects
+# (force=True) were refused outright between 10dbed0 and the anchor fix, so nothing had ever
+# compared what they compute. Same case, same steps, one flag apart.
+import rasterio
+
+def depth(tag, env_value):
+    os.environ["GEOSWE_DENSE_FUSE_STEP_FORCINGS"] = env_value
+    run(tag, [])
+    with rasterio.open(os.path.join(tag, "final_depth.tif")) as ds:
+        return np.nan_to_num(ds.read(1))
+
+split = depth("out_split", "0")
+fused = depth("out_fused", "1")
+print(f"split max {split.max():.6f} m, fused max {fused.max():.6f} m, "
+      f"max |difference| {np.abs(fused - split).max():.3e} m")
+assert split.max() > 1e-3, "the reference run put no water anywhere"
+assert np.array_equal(fused, split), (
+    "fusing the step forcings changed the result; the configuration reference calls it "
+    "bit-identical")
+print("OK")
+'''
+
+
 def _run_script(script, tmp_path, what):
     env = dict(os.environ)
     env["GEOSWE_BACKEND"] = "cupy"
@@ -127,3 +153,7 @@ def test_driver_carries_uniform_rain_to_both_backends(tmp_path):
 
 def test_snapshots_are_dense_only_and_as_long_as_they_say(tmp_path):
     _run_script(_SCRIPT_SNAPSHOTS, tmp_path, "the driver snapshot run")
+
+
+def test_fusing_the_step_forcings_changes_nothing(tmp_path):
+    _run_script(_SCRIPT_FUSED_FORCINGS, tmp_path, "the fused step-forcings run")

@@ -111,8 +111,19 @@ assert float(np.abs(to_host(s.q_interior[1])).max()) > 0.0
 
 diff = np.abs(hd - hc)
 print(f"max|dh| = {diff.max():.3e}")
-# fp32 tightness rather than bit-identity (robust to kernel-level ULP noise).
-assert np.allclose(hd, hc, atol=1e-6), f"dense vs compressed h mismatch: max|dh|={diff.max():.3e}"
+# fp32 tightness rather than bit-identity (robust to kernel-level ULP noise), and rtol=0
+# so the bound is the one stated: allclose's default rtol=1e-5 makes the real bound
+# 1e-6 + 1e-5*|hc|, which is 9.5e-6 at this case's deepest cell (h_max 0.854 m), 9.5x the
+# atol. Not array_equal: what the project claims is a bit-identical RESIDUAL at a fixed
+# state (docs/compressed_mesh.md), not a bit-identical run, and this case measures 1.8e-7.
+TOL = dict(atol=1e-6, rtol=0.0)
+assert np.allclose(hd, hc, **TOL), f"dense vs compressed h mismatch: max|dh|={diff.max():.3e}"
+# Guard the guard: a divergence above the stated atol must be rejected. 5e-6 at the
+# deepest cell sits under the default-rtol bound, which is how the slack went unnoticed.
+probe = hc.copy()
+probe[np.unravel_index(int(np.argmax(hc)), hc.shape)] += 5.0e-6
+assert not np.allclose(hd, probe, **TOL), (
+    "the comparison above is not enforcing atol=1e-6; pass rtol=0 to np.allclose")
 print("OK")
 '''
 

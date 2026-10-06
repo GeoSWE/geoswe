@@ -155,8 +155,16 @@ def nbr_to_int16_delta(nbr_abs):
     """(N,4) int32 ABS neighbour ids (-1=none) -> int16 DELTAS (id-k; -32768=none)."""
     k = np.arange(nbr_abs.shape[0], dtype=np.int64)[:, None]
     d = np.where(nbr_abs >= 0, nbr_abs.astype(np.int64) - k, -32768)
-    assert d.max() < 32768 and d[d != -32768].min() > -32768, \
-        "nbr delta exceeds int16 (need int32 / different partition)"
+    _hi = int(d.max()); _lo = int(d[d != -32768].min())
+    # Raise, not assert: python -O strips an assert, and the int16 cast below then WRAPS
+    # the overflow into a plausible neighbour id -- a cache miswired in silence.
+    if not (_hi < 32768 and _lo > -32768):
+        raise ValueError(
+            f"neighbour delta out of int16 range (min {_lo}, max {_hi}): a stored row of "
+            f"this rank spans more than 32768 cells, and the flat kernels declare "
+            f"`const short*` for the neighbour table, so int32 is not a way out. Build "
+            f"the cache with more --ranks (the split is along y, which is what narrows a "
+            f"row), or coarsen the grid.")
     return np.ascontiguousarray(d.astype(np.int16))
 
 

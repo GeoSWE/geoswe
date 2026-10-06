@@ -1,23 +1,26 @@
-"""runlib.replay: compressed-mesh cache-replay entry (entire-Florida / Gulf production path).
+"""runlib.replay: run a saved compressed-mesh cache, the path used for the largest domains.
 
-Verbatim extraction of experiments/florida_helene/run_compressed_cached.py's body: loads a flat
-(N_active) preprocess cache straight to GPU (NO dense domain is ever materialized) and runs the
-compressed step loop with checkpoint / resume / wall-deadline stop, via
-geoswe.compressed_solver.run_cached. This is the entire-Florida production path: 4-GPU MPI, where
-each rank loads cache_dir/r<rank>/, and the run survives SLURM session limits via --resume +
---stop-at-epoch (final checkpoint before the deadline, resume next session).
+Loads a flat ``(N_active)`` preprocessing cache straight to the GPU, with no dense domain ever
+materialised, and runs the compressed step loop through
+:func:`geoswe.compressed_solver.run_cached`. Everything the run needs is baked into the cache
+(the grid geometry in its ``meta.json``, and the bed, sub-grid storage, ring, sponge, rainfall
+and drain fields), so unlike :func:`geoswe.runlib.driver.main` this path takes no case, bc or
+tide inputs. Under MPI each rank reads its own ``<cache>/r<rank>/`` subdirectory.
 
-FL_ENTIRE is a BUILD-time env var only (the 02–09 preprocessing scripts); the run reads all grid
-geometry from the cache meta.json, so this module needs no event/tide/case inputs, unlike the
-dense runlib.driver.main, the cache has bed/σ/ring/sponge/rain/drain all baked in.
+A run longer than one scheduler session survives it: ``--checkpoint-every-h`` dumps the state
+periodically, ``--stop-at-epoch`` (or ``--stop-buffer-min``, read from ``$SLURM_JOB_END_TIME``)
+takes a final checkpoint just before the deadline and stops cleanly, and the next session
+continues with ``--resume``.
 
-Gate: bit-identical to backup/run_compressed_cached_orig.py (cmp_frames + checkpoint→resume
-equivalence) on the entire-FL cond cache.
+``benchmark/pinellas_3m/run_cache_3m.py`` is a shipped script that performs the same sequence
+without the checkpoint plumbing: pin one GPU per rank, then hand the cache to ``run_cached``.
 """
 from __future__ import annotations
 import argparse
 import os
 import sys
+
+from . import _abort_all_ranks
 
 
 def build_cached_parser():
@@ -66,9 +69,8 @@ class _Tee:
 def _write_manifest(args, comm):
     """Write out/run_manifest_<n>.json before stepping: every numerical switch, the
     environment, and the code+cache identity. Answers "exactly what configuration
-    produced this result?" without relying on shell history -- the archived Florida
-    production log could not (revision-0802 item 1.2/1.7). Never raises: a manifest
-    failure must not kill a multi-hour run."""
+    produced this result?" without relying on shell history, which an archived production
+    log cannot. Never raises: a manifest failure must not kill a multi-hour run."""
     import json, glob, subprocess, time
     try:
         m = {
@@ -116,47 +118,55 @@ def _write_manifest(args, comm):
 
 
 def main(args, *, comm):
-    """Run (or resume) a compressed-cache replay. `comm` is the mpi4py communicator (or None).
+    """Run (or resume) a compressed-cache replay. ``comm`` is the mpi4py communicator (or None).
 
-    GPU pinning (cp.cuda.Device(rank % ngpu).use()) must happen in the caller BEFORE cupy-heavy
-    imports; the thin wrappers do this. This function then matches run_compressed_cached.py
-    byte-for-byte: stop-epoch resolution, rank-0 tee'd run.log (append), and run_cached().
+    The caller pins one GPU per rank (``cp.cuda.Device(rank % ngpu).use()``) before any
+    CuPy-heavy import, which is why this module imports nothing heavy at module level. This
+    function then resolves the wall-clock deadline, opens the rank-0 ``run.log`` (appended, so
+    a resumed leg continues the same file), writes the run manifest beside it, and hands the
+    cache to :func:`geoswe.compressed_solver.run_cached`.
     """
-    from ..compressed_solver import run_cached
+    try:
+        from ..compressed_solver import run_cached
 
-    stop_epoch = args.stop_at_epoch
-    if (not stop_epoch) and args.stop_buffer_min:
-        if os.environ.get("SLURM_JOB_END_TIME"):
-            stop_epoch = float(os.environ["SLURM_JOB_END_TIME"]) - args.stop_buffer_min * 60.0
-        elif comm is None or comm.rank == 0:
-            # the user believes a pre-deadline checkpoint is armed; a
-            # silent no-op here means the scheduler hard-kills the run and the
-            # leg's progress since the last periodic checkpoint is lost.
-            print("  ! --stop-buffer-min set but SLURM_JOB_END_TIME is not in the "
-                  "environment -- NO wall-deadline checkpoint is armed "
-                  "(use --stop-at-epoch to set one explicitly)", flush=True)
+        stop_epoch = args.stop_at_epoch
+        if (not stop_epoch) and args.stop_buffer_min:
+            if os.environ.get("SLURM_JOB_END_TIME"):
+                stop_epoch = float(os.environ["SLURM_JOB_END_TIME"]) - args.stop_buffer_min * 60.0
+            elif comm is None or comm.rank == 0:
+                # the user believes a pre-deadline checkpoint is armed; a
+                # silent no-op here means the scheduler hard-kills the run and the
+                # leg's progress since the last periodic checkpoint is lost.
+                print("  ! --stop-buffer-min set but SLURM_JOB_END_TIME is not in the "
+                      "environment -- NO wall-deadline checkpoint is armed "
+                      "(use --stop-at-epoch to set one explicitly)", flush=True)
 
-    rank0 = (comm is None or comm.rank == 0)
-    if rank0:
-        os.makedirs(args.out, exist_ok=True)
-    if comm is not None:
-        comm.Barrier()
-    # write a REAL run.log into the results folder (rank 0), tee'd with the console so the
-    # monitor still sees it. Append mode -> a --resume leg adds to the same run.log.
-    if rank0:
-        # this tee is intentionally process-lifetime (a one-shot CLI). It is NOT
-        # restored; do not call replay.main() repeatedly in one process (the _Tee would nest).
-        _logf = open(os.path.join(args.out, "run.log"), "a", buffering=1)
-        sys.stdout = _Tee(sys.__stdout__, _logf)
-        sys.stderr = _Tee(sys.__stderr__, _logf)
-        print(f"# run.log -- cache={args.cache} t_end_h={args.t_end_h} resume={args.resume} "
-              f"ckpt_every_h={args.checkpoint_every_h}", flush=True)
-    ckpt_dir = args.ckpt_dir or os.path.join(args.out, "checkpoints")
-    if rank0:
-        _write_manifest(args, comm)
-    run_cached(args.cache, t_end=args.t_end_h * 3600.0, frame_every_s=args.frame_every_s,
-               out_dir=args.out, cfl=args.cfl, h_min=args.h_min,
-               comm=(comm if (comm is not None and comm.size > 1) else None),
-               checkpoint_every_s=args.checkpoint_every_h * 3600.0, ckpt_dir=ckpt_dir,
-               resume=args.resume,
-               max_wall_s=args.max_wall_min * 60.0, stop_at_epoch=stop_epoch)
+        rank0 = (comm is None or comm.rank == 0)
+        if rank0:
+            os.makedirs(args.out, exist_ok=True)
+        if comm is not None:
+            comm.Barrier()
+        # write a REAL run.log into the results folder (rank 0), tee'd with the console so the
+        # monitor still sees it. Append mode -> a --resume leg adds to the same run.log.
+        if rank0:
+            # this tee is intentionally process-lifetime (a one-shot CLI). It is NOT
+            # restored; do not call replay.main() repeatedly in one process (the _Tee would nest).
+            _logf = open(os.path.join(args.out, "run.log"), "a", buffering=1)
+            sys.stdout = _Tee(sys.__stdout__, _logf)
+            sys.stderr = _Tee(sys.__stderr__, _logf)
+            print(f"# run.log -- cache={args.cache} t_end_h={args.t_end_h} resume={args.resume} "
+                  f"ckpt_every_h={args.checkpoint_every_h}", flush=True)
+        ckpt_dir = args.ckpt_dir or os.path.join(args.out, "checkpoints")
+        if rank0:
+            _write_manifest(args, comm)
+        run_cached(args.cache, t_end=args.t_end_h * 3600.0, frame_every_s=args.frame_every_s,
+                   out_dir=args.out, cfl=args.cfl, h_min=args.h_min,
+                   comm=(comm if (comm is not None and comm.size > 1) else None),
+                   checkpoint_every_s=args.checkpoint_every_h * 3600.0, ckpt_dir=ckpt_dir,
+                   resume=args.resume,
+                   max_wall_s=args.max_wall_min * 60.0, stop_at_epoch=stop_epoch)
+    except (Exception, KeyboardInterrupt) as exc:
+        # Exception, not BaseException: the uniform sys.exit() of an argument check must stay a
+        # clean exit on every rank, and only an unexpected failure needs the job taken down.
+        _abort_all_ranks(comm, exc)
+        raise

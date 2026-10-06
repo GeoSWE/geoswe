@@ -1,10 +1,10 @@
-"""runlib.cli: shared argparse for the coastal surge+rain runners.
+"""runlib.cli: the shared command line of the coastal surge and rain runners.
 
-Verbatim extraction of run_pinellas_mpi.py's ArgumentParser (lines 77-145). pinellas_helene is
-the reference; pinellas_milton adds --wb-method / --friction-quadratic-alpha (pass extra=... to
-build_parser to append event-specific options without diverging the shared core).
-
-Gate: parse the production argv and assert the namespace matches the documented values.
+One parser serves every case runner, so the options, the defaults and the help text do not
+drift between events; a runner that needs its own options passes ``extra=`` to
+:func:`build_parser` and appends them instead of forking the shared core.
+``benchmark/pinellas_3m/run_pinellas_mpi.py`` shows the whole sequence a runner performs:
+parse the arguments, pin one GPU per MPI rank, then call :func:`geoswe.runlib.driver.main`.
 """
 from __future__ import annotations
 import argparse
@@ -84,7 +84,18 @@ def build_parser(extra=None):
     ap.add_argument("--stage-clamp-npz", default=None,
                      help="Optional NPZ with arrays 'rows', 'cols', 'h_max' to clamp h<=h_max at specific cells (global indices). Mimics controlled spillway / stage BC at points like Lake Tarpon S-551.")
     ap.add_argument("--n-steps", type=int, default=0,
-                    help="If >0, run exactly N steps with fixed dt=0.3 (debug)")
+                    help="If >0, run exactly N steps with fixed dt=0.3 (debug). The CFL is not "
+                         "consulted, so a grid that cannot take 0.3 s diverges; the final rasters "
+                         "are checked for finiteness before they are written.")
+    ap.add_argument("--dt-min", type=float, default=0.0,
+                    help="Stop the run when the CFL time step falls below this (s); "
+                         "0 (default) = no floor, as in the calibrated runs. Heavy rain on the "
+                         "narrowest sub-grid storage channels (sigma ~ 0.2) can collapse dt and "
+                         "leave the job grinding out its whole allocation for a few simulated "
+                         "minutes; with a floor it stops and reports the step, the time and the dt. "
+                         "Raise --h-min-cfl instead to keep near-dry films out of the CFL. Both "
+                         "step loops honour it: the dense loop checks it, and --compressed takes "
+                         "it in place of its own GEOSWE_DT_MIN.")
     ap.add_argument("--compressed", action="store_true",
                     help="Opt-in: run the flat compressed-mesh step loop (geoswe.compressed_solver) "
                          "instead of the dense loop. Default OFF -> unchanged dense path. One "

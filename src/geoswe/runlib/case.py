@@ -1,11 +1,13 @@
-"""runlib.case: load the coastal case (global grid, pre-MPI-slice).
+"""runlib.case: load and condition a prepared coastal case, before any MPI slicing.
 
-Verbatim extraction of the case-loading block from experiments/pinellas_helene/run_pinellas_mpi.py
-(lines ~181-247): bed cleanup (NODATA fill + clip + shoreline smoothing), NHD creek burn-in with
-optional 1 m-DEM channel-bed override, Manning cleanup, and the ring-BC arrays. Returns a bundle;
-MPI slicing, tide-gauge CSVs, and the per-cell forcings live in driver/forcings (kept out here).
-
-Gate: tests compare load_case() output to the runner's inline block bit-for-bit (array_equal).
+:func:`load_case` reads the two npz files a case runner is handed, the case grid and the
+boundary conditions, and returns the global arrays the driver then slices per rank: the
+conditioned bed (no-data fill, clip to the coastal range, shoreline smoothing, optional
+creek burn-in with a 1 m-DEM channel-bed override), the Manning field, the active mask and
+the ring-boundary arrays. Pure NumPy, no GPU and no MPI, so a case can be loaded and
+inspected on its own. The tide-gauge series, the per-cell forcings and the MPI slicing live
+in :mod:`geoswe.runlib.driver`; ``benchmark/pinellas_3m/run_pinellas_mpi.py`` is a runner
+that uses both.
 """
 from __future__ import annotations
 import types
@@ -18,9 +20,10 @@ def load_case(case_path, bc_path, *, dtype="float32", nhd_path=None, channel_bed
               proc_dtype="float64", say=None):
     """Load + condition the global case grid + ring-BC arrays. Pure NumPy (no GPU/MPI).
 
-    proc_dtype: precision for bed/Manning conditioning (clip/smooth/burn). "float64" reproduces
-    the validated runner bit-for-bit (use for the gate). "float32" is the lean production path
-    (sub-cm difference, no f64 transient; matters at CONUS scale: ~58 GB vs ~116 GB global bed).
+    ``proc_dtype`` is the precision of the conditioning itself (clip, smooth, burn). Use
+    "float64", the default, to reproduce the published Pinellas runs bit for bit. "float32" is
+    the lean production path: differences of under a centimetre and no float64 transient, which
+    is what matters at CONUS scale (about 58 GB against 116 GB for the global bed).
     """
     # scipy is an optional extra; import it here (not at module level)
     # so `import geoswe.runlib` works without it.

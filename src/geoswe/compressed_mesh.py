@@ -27,7 +27,8 @@ For the kernel writer: read ``q_c[k]`` for cell k, then look at
 ``neighbors[k, dir]``; if it is BOUNDARY_ID, apply ghost-cell rule (typically
 extrapolate: ghost value = own value); else read ``q_c[neighbors[k, dir]]``.
 
-Pack/unpack helpers:
+Pack/unpack helpers (both on the PADDED ``(nxp, nyp)`` extent, which they check:
+a CuPy fancy index wraps a stray index instead of raising):
 - ``pack(arr_2d)``: extracts ``arr_2d[i, j]`` at the active subset, returns
   a flat ``(N_active,)`` array.
 - ``unpack(arr_flat, fill=...)``: scatters back to ``(nxp, nyp)`` with ``fill``
@@ -138,14 +139,28 @@ class CompressedMesh2D:
     # pack / unpack helpers (run on whatever backend `xp` is bound to)
     # ------------------------------------------------------------------
     def pack(self, arr_2d):
-        """Scatter the active subset of a (nxp, nyp) or (..., nxp, nyp)
+        """Gather the active subset of a padded (nxp, nyp) or (..., nxp, nyp)
         array into a flat (N_active,) or (..., N_active) array.
 
         Uses fancy indexing. ``ij_active`` lives on the ACTIVE
         backend (a CuPy device array under the GPU backend), so ``arr_2d``
         must be on the same backend -- pack(numpy_array) raises under CuPy;
         ``cp.asarray`` the input first.
+
+        The last two axes must be the PADDED extent. CuPy's fancy indexing wraps an
+        out-of-range index per axis rather than raising (NumPy raises IndexError, and
+        the compressed solver is CuPy-only), so a field on another extent is gathered
+        from the wrong cells and comes back plausible and finite: measured on a 24x20
+        mesh handed a (22, 18) field, 61 of 328 entries came from a wrapped index, the
+        worst 2218 off. Hence the shape check, the same hazard set_manning_table names.
         """
+        if tuple(arr_2d.shape[-2:]) != (self.nxp, self.nyp):
+            raise ValueError(
+                f"CompressedMesh2D.pack: the last two axes of this field are "
+                f"{tuple(arr_2d.shape[-2:])}, not the ({self.nxp}, {self.nyp}) padded grid "
+                f"this mesh was built on. Pass the padded field (the shape of the dense "
+                f"solver's q[0] or b); an interior-shaped one would be gathered from the "
+                f"wrong cells, silently.")
         i = self.ij_active[:, 0]
         j = self.ij_active[:, 1]
         if arr_2d.ndim == 2:
@@ -155,7 +170,21 @@ class CompressedMesh2D:
 
     def unpack(self, arr_flat, fill=0.0, out=None):
         """Scatter a flat (N_active,) array back to (nxp, nyp) with ``fill``
-        at outside/ghost cells. If ``out`` is given, write into it in place."""
+        at outside/ghost cells. If ``out`` is given, write into it in place.
+
+        The mirror of pack's check, for the same reason: a CuPy scatter wraps an
+        out-of-range index too (measured: index 5 into a 4-long axis writes row 1), so a
+        wrongly shaped ``out`` would be filled at the wrong cells with no error at all.
+        """
+        if arr_flat.ndim < 1 or arr_flat.shape[-1] != self.N_active:
+            raise ValueError(
+                f"CompressedMesh2D.unpack: this flat field has shape "
+                f"{tuple(arr_flat.shape)}, whose last axis is not N_active={self.N_active} "
+                f"-- it was packed from another mesh or another active mask.")
+        if out is not None and tuple(out.shape[-2:]) != (self.nxp, self.nyp):
+            raise ValueError(
+                f"CompressedMesh2D.unpack: `out` has last two axes {tuple(out.shape[-2:])}, "
+                f"not the ({self.nxp}, {self.nyp}) padded grid of this mesh.")
         nxp, nyp = self.nxp, self.nyp
         i = self.ij_active[:, 0]
         j = self.ij_active[:, 1]

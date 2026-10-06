@@ -8,7 +8,10 @@ gathers the cells each rank owns into the global field and prints one md5 of it.
 digest must be the same for every rank count and every halo configuration
 (SWE_HALO_CUDA_AWARE, SWE_HALO_OVERLAP / SWE_DENSE_HALO_OVERLAP, SWE_CFL_ASYNC,
 SWE_FLAT_FUSE_STEP): a ghost cell is an exact copy of the neighbour's cell, so the
-arithmetic a cell sees does not depend on where the seams are or on how the halo travels.
+arithmetic a cell sees does not depend on where the seams are or on how the halo travels. `Solver2D.cfl_robust_pct`
+is outside this matrix: `cfl_dt` refuses it under MPI, because a per-rank percentile reduced
+with MAX is not the global percentile and the digest would then depend on the rank count by
+construction.
 
 tests/mpi_bitcheck.py hashes the same owned cells, but one digest per rank: its digests
 compare halo configurations at a fixed rank count. Gathering the field first gives a
