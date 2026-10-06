@@ -28,6 +28,15 @@ accuracy for cost and robustness:
 | `"linear5"` | 5th | high-order linear (needs `ngh>=3`) |
 | `"weno5"` | 5th | WENO, shock-capturing |
 
+```{warning}
+`recon` is used only when `well_balanced=False`. With the default
+`well_balanced=True` the surface-reconstruction method builds the face states
+itself, and they are first order by construction, so `muscl` and `weno5` give
+the same answer to the last bit as `first`. A reconstruction study therefore
+sets `well_balanced=False`, as {file}`examples/ex07_convergence_order.py` does;
+a `Config` that asks for both now says so.
+```
+
 ```{tip}
 For real-terrain flood runs the production configuration is
 `recon="first"` with the well-balanced SRM source, which is robust on noisy DEMs

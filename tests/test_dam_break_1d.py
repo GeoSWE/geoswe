@@ -6,8 +6,10 @@ from geoswe import Mesh1D, Config, Solver1D, to_host
 def test_dam_break_1d_conserves_mass_and_forms_shock():
     nx, dx = 400, 1.0
     mesh = Mesh1D(nx=nx, dx=dx, ngh=4)
+    # well_balanced=False: flat bed, and the well-balanced face states are first
+    # order by construction, so with the default this would not be a MUSCL run
     cfg = Config(pde="baseline", flux="hllc", recon="muscl", time="ssprk3",
-                 cfl=0.4, bc_x="extrapolate", dtype="float64")
+                 well_balanced=False, cfl=0.4, bc_x="extrapolate", dtype="float64")
     q0 = np.zeros((2, nx))
     q0[0, : nx // 2] = 2.0
     q0[0, nx // 2 :] = 1.0

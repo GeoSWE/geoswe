@@ -527,6 +527,71 @@ def _ensure_friction_kernel():
         _FRICTION_KERNEL_FP32 = raw_kernel(_FRICTION_KERNEL_SRC, "friction_wd")
 
 
+def _check_numeric_inputs(where="Config", **vals):
+    """Bound the numeric inputs an entry point takes as plain floats.
+
+    ``Config`` validated nine string enums and no numbers, so ``cfl=5.0`` ran to
+    completion with several times the initial mass behind one bare overflow warning,
+    ``h_min=-1.0`` died in complex arithmetic, and ``g=-9.81`` reported a non-finite
+    wave speed and blamed the forcing. ``CompressedSolver.from_dense`` and
+    ``run_cached`` take the same quantities as floats without passing through
+    ``Config``, so they call this too. Pass only the values you have; ``None`` is
+    skipped. Raises ``ValueError``; warns where a value is legal but unlikely to be
+    what the caller meant.
+    """
+    import math as _math
+    import warnings
+
+    def _f(name):
+        v = vals.get(name, None)
+        return None if v is None else float(v)
+
+    for name, v in list(vals.items()):
+        if v is not None and not _math.isfinite(float(v)) and name != "friction_velocity_cap_ms":
+            raise ValueError(f"{where}.{name}={v!r} is not finite")
+    cfl = _f("cfl")
+    if cfl is not None and not (0.0 < cfl <= 1.0):
+        raise ValueError(
+            f"{where}.cfl={cfl} is outside (0, 1]: the explicit step is unstable above the "
+            f"Courant limit, and the run would lose mass or overflow rather than fail. "
+            f"The published runs use 0.5.")
+    if cfl is not None and cfl > 0.5:
+        warnings.warn(
+            f"{where}.cfl={cfl} is above 0.5. With the max(|u|,|v|) velocity norm the 2D "
+            f"limit is near 0.5, which is what every published run uses; 1.0 is stable only "
+            f"on mild cases.", stacklevel=3)
+    g = _f("g")
+    if g is not None and g <= 0.0:
+        raise ValueError(f"{where}.g={g} must be positive (gravity, m/s^2; 9.81 on Earth)")
+    h_min = _f("h_min")
+    if h_min is not None and h_min <= 0.0:
+        raise ValueError(
+            f"{where}.h_min={h_min} must be positive: it is the wet/dry depth threshold and "
+            f"a divisor for the velocity, so zero or less gives complex or infinite speeds. "
+            f"The defaults are 1e-6 m (float32) and 1e-10 m (float64).")
+    hmc = _f("h_min_cfl")
+    if hmc is not None and hmc < 0.0:
+        raise ValueError(f"{where}.h_min_cfl={hmc} must be >= 0 (0 couples it to h_min)")
+    mn = _f("manning_n")
+    if mn is not None and mn < 0.0:
+        raise ValueError(
+            f"{where}.manning_n={mn} must be >= 0. Friction squares n, so a negative value "
+            f"behaves like its magnitude except under the velocity cap, which replaces it "
+            f"with the critical roughness. set_manning() rejects it; so does this.")
+    vcap = _f("friction_velocity_cap_ms")
+    if vcap is not None and vcap <= 0.0:
+        raise ValueError(
+            f"{where}.friction_velocity_cap_ms={vcap} must be positive (np.inf disables the cap)")
+    sc = _f("storage_courant")
+    if sc is not None and sc < 0.0:
+        raise ValueError(f"{where}.storage_courant={sc} must be >= 0 (0 disables the curve)")
+    rain = _f("rainfall")
+    if rain is not None and rain > 1.0e-3:
+        warnings.warn(
+            f"{where}.rainfall={rain} is in m/s, not mm/h, and {rain} m/s is "
+            f"{rain * 3.6e6:,.0f} mm/h. 75 mm/h is rainfall=75/3.6e6.", stacklevel=3)
+
+
 @dataclass
 class Config:
     """Solver configuration.
@@ -740,6 +805,19 @@ class Config:
         # The IGR entropic-pressure model is research code: it has no test coverage, its Sigma
         # kernels differ between the CPU and GPU paths, and alpha=0 (the default) makes it
         # silently identical to 'baseline'. It is therefore not part of the 1.x API promise.
+        _check_numeric_inputs(
+            where="Config", cfl=self.cfl, g=self.g, h_min=self.h_min, h_min_cfl=self.h_min_cfl,
+            manning_n=self.manning_n, friction_velocity_cap_ms=self.friction_velocity_cap_ms,
+            storage_courant=self.storage_courant, rainfall=self.rainfall)
+        # recon is discarded whenever the face states are well balanced, which is the
+        # default: the SRM builds them itself. Documented in six places, and still worth
+        # saying out loud, because a method study that forgets it measures nothing.
+        if self.well_balanced and self.recon != "first":
+            import warnings
+            warnings.warn(
+                f"Config.recon={self.recon!r} has no effect with well_balanced=True (the "
+                f"default): the well-balanced face states are first order by construction. "
+                f"Pass well_balanced=False to measure the reconstruction order.", stacklevel=3)
         if self.pde == "igr" and os.environ.get("GEOSWE_ENABLE_IGR", "0") != "1":
             raise ValueError(
                 "Config.pde='igr' (Information-Geometric Regularization) is experimental and "
@@ -803,6 +881,10 @@ class Solver1D:
         if tuple(q0.shape) != (2, mesh.nx) or tuple(b.shape) != (mesh.nx,):
             raise ValueError(f"Solver1D expects q0 of shape (2, {mesh.nx}) for (h, hu) and a bed of "
                              f"shape ({mesh.nx},); got {tuple(q0.shape)} and {tuple(b.shape)}")
+        for _what, _arr in (("the bed", b), ("the initial state q0", q0)):
+            if not bool(np.isfinite(_arr).all()):
+                raise ValueError(f"Solver1D: {_what} holds non-finite values (NaN or inf); "
+                                 f"fill them before constructing the solver")
         self.q = np.zeros((2, nxp), dtype=dt)
         self.q[:, ngh : ngh + mesh.nx] = q0.astype(dt, copy=False)
         self.b = np.zeros(nxp, dtype=dt)
@@ -1099,6 +1181,28 @@ class Solver2D:
         if tuple(b.shape) != (mesh.nx, mesh.ny):
             raise ValueError(f"the bed must have shape (nx, ny) = ({mesh.nx}, {mesh.ny}); "
                              f"got {tuple(b.shape)}")
+        # One finite reduction per array, once per construction: read_geotiff fills a
+        # declared no-data value with NaN by default, and a single NaN cell otherwise
+        # surfaced many simulated seconds later as "non-finite max wave speed ... check
+        # forcing/inputs", which never mentions the bed.
+        for _what, _arr, _fix in (
+                ("the bed", b, "bed = np.nan_to_num(dem.data, nan=float(np.nanmin(dem.data)))"),
+                ("the initial state q0", q0, "q0 = np.nan_to_num(q0)")):
+            if not bool(np.isfinite(_arr).all()):
+                raise ValueError(f"Solver2D: {_what} holds non-finite values (NaN or inf); "
+                                 f"fill them before constructing the solver, e.g. {_fix}")
+        # Gridded rain is indexed [time, x, y] on the solver's own grid. A (nt, ny, nx)
+        # array used to construct cleanly and fail on the first step with a bare broadcast
+        # error; a (nt, ny) or (nt, 1) one broadcast without complaint and laid rain that
+        # was constant in x. getattr, because the repo's own gridded forcings are
+        # duck-typed objects with no rate_mm_h at all.
+        _rate = getattr(getattr(cfg, "rainfall_forcing", None), "rate_mm_h", None)
+        if _rate is not None and int(getattr(_rate, "ndim", 1)) == 3 \
+                and tuple(_rate.shape[1:]) != (mesh.nx, mesh.ny):
+            raise ValueError(
+                f"Config.rainfall_forcing.rate_mm_h has shape {tuple(_rate.shape)}; gridded "
+                f"rain must be (nt, nx, ny) = (nt, {mesh.nx}, {mesh.ny}) on this solver's grid, "
+                f"in [x, y] order. An image-style [row, column] frame needs np.flipud(a).T.")
         if "dirichlet" in (cfg.bc_x, cfg.bc_y):
             raise ValueError("bc 'dirichlet' exists for Solver1D only; in 2D impose a water "
                              "level with a StageBoundary (Config.stage_boundary)")

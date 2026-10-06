@@ -19,8 +19,11 @@ def test_dam_break_dry_bed_matches_ritter_front():
     # h < h_min, which at the default deletes O(h_min) mass per front cell per
     # step and masks true conservation. 1e-14 keeps the clamp (positivity)
     # while making its mass effect < 1e-12 relative.
+    # well_balanced=False: flat bed, and the well-balanced face states would
+    # otherwise discard recon="muscl" (they are first order by construction)
     cfg = Config(pde="baseline", flux="hllc", recon="muscl", time="ssprk3",
-                 cfl=0.4, bc_x="extrapolate", dtype="float64", h_min=1e-14)
+                 well_balanced=False, cfl=0.4, bc_x="extrapolate",
+                 dtype="float64", h_min=1e-14)
     q0 = np.zeros((2, nx))
     q0[0, : nx // 2] = hL          # wet reservoir left, DRY bed right
     bed = np.zeros(nx)

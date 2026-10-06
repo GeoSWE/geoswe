@@ -52,6 +52,13 @@ class RainfallForcing:
             self.time_s = np.asarray(self.time_s, dtype=np.float64)
         if isinstance(self.rate_mm_h, (list, tuple)):
             self.rate_mm_h = np.asarray(self.rate_mm_h, dtype=np.float64)
+        _nd = int(getattr(self.rate_mm_h, "ndim", 1))
+        if _nd not in (1, 3):
+            raise ValueError(
+                f"RainfallForcing: rate_mm_h has shape {tuple(self.rate_mm_h.shape)}; it must be "
+                f"1-D (nt,) for a uniform rate or 3-D (nt, nx, ny) for a gridded one, in [x, y] "
+                f"order. A 2-D (nt, 1) column -- the df[['rate_mm_h']] double-bracket slip -- "
+                f"broadcasts without any error and lays rain that is constant in x.")
         if int(self.rate_mm_h.shape[0]) < len(self.time_s):
             raise ValueError(
                 f"RainfallForcing: {len(self.time_s)} times but only "

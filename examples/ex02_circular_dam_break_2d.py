@@ -22,6 +22,9 @@ mesh = Mesh2D(nx=nx, ny=ny, dx=dx, dy=dy, ngh=4)
 
 cfg = Config(
     pde="baseline", flux="hllc", recon="muscl", time="ssprk3", cfl=0.4,
+    # flat bed, so the well-balanced face states (first order by construction, and
+    # the default) are not needed here and would discard `recon`
+    well_balanced=False,
     bc_x="extrapolate", bc_y="extrapolate", dtype="float64",
 )
 

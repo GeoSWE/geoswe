@@ -72,7 +72,15 @@ def depth(**kw):
     return cs.depth(), cs
 
 
-# 2. the two friction settings the flat kernel does take, and used to drop
+# 2. the numbers spelled out as floats get the bounds Config would have applied
+for kw, word in ((dict(cfl=5.0), "cfl"), (dict(h_min=-1.0), "h_min"), (dict(g=0.0), "g")):
+    try:
+        CompressedSolver.from_dense(dense(), say=None, **kw)
+        raise SystemExit(f"from_dense accepted {kw}")
+    except ValueError as e:
+        assert word in str(e) and "from_dense" in str(e), e
+
+# 3. the two friction settings the flat kernel does take, and used to drop
 base, cs_base = depth()
 assert cs_base.vcap == 15.0 and cs_base.use_quad is True
 capped, cs_cap = depth(friction_velocity_cap_ms=0.05)
@@ -84,7 +92,7 @@ print(f"vcap 0.05: max |dh| {d_cap:.2e} m; linearized alpha: {d_lin:.2e} m")
 assert d_cap > 1e-4, "the velocity cap did not reach the flat friction kernel"
 assert d_lin > 1e-3, "friction_quadratic_alpha did not reach the flat friction kernel"
 
-# 3. a forcing attached after the flat build is refused, not silently ignored
+# 4. a forcing attached after the flat build is refused, not silently ignored
 cs = CompressedSolver.from_dense(dense(), say=None).set_rain(rain)
 cs.run(10.0, say=None)
 for name, call in (("set_rain", lambda: cs.set_rain(rain)),
@@ -101,7 +109,7 @@ for name, call in (("set_rain", lambda: cs.set_rain(rain)),
 # the ones read at run() time still work after it
 cs.set_drain(None).set_infil(None).enable_max_depth(False)
 
-# 4. rain asked for on the dense Config and not attached here: say so
+# 5. rain asked for on the dense Config and not attached here: say so
 with warnings.catch_warnings(record=True) as w:
     warnings.simplefilter("always")
     CompressedSolver.from_dense(dense(rainfall_forcing=rain), say=None).run(5.0, say=None)
@@ -112,7 +120,7 @@ with warnings.catch_warnings(record=True) as w:
     CompressedSolver.from_dense(dense(), say=None).run(5.0, say=None)
 assert not any("rainfall" in str(x.message) for x in w), [str(x.message) for x in w]
 
-# 5. a cache cannot hold the stage clamp, and says so instead of replaying without it
+# 6. a cache cannot hold the stage clamp, and says so instead of replaying without it
 cs = CompressedSolver.from_dense(dense(), say=None).set_rain(rain)
 cs.set_clamp(dict(rows=np.array([NGH + 3]), cols=np.array([NGH + 3]), hmax=np.array([0.2])))
 with warnings.catch_warnings(record=True) as w:

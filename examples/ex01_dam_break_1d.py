@@ -24,6 +24,8 @@ cfg = Config(
     flux="hllc",           # HLLC approximate Riemann solver
     recon="muscl",         # 2nd-order MUSCL reconstruction
     time="ssprk3",         # 3rd-order SSP Runge-Kutta
+    well_balanced=False,   # flat bed here, and the WB face states are 1st order:
+                           # without this, `recon` above would have no effect
     cfl=0.4,
     bc_x="extrapolate",    # open ends
     dtype="float64",

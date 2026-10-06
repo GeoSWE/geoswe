@@ -2719,6 +2719,7 @@ class CompressedSolver:
         """
         from .mesh import Mesh2D
         from .compressed_rhs import CompressedSWE
+        from .solver import _check_numeric_inputs
         if say is None:
             say = lambda *a, **k: None
         if comm is not None and comm.size > 1 and any(v is None for v in (
@@ -2734,6 +2735,8 @@ class CompressedSolver:
         h_min = max(float(s.cfg.h_min), 1.0e-6) if h_min is None else h_min
         x0 = s.mesh.x0 if x0 is None else x0
         y0 = s.mesh.y0 if y0 is None else y0
+        # the same bounds Config applies, for the caller who spells these out as floats
+        _check_numeric_inputs(where="CompressedSolver.from_dense", cfl=cfl, g=g, h_min=h_min)
         nx_glob = s.mesh.nx if nx_glob is None else nx_glob
         ny_glob = s.mesh.ny if ny_glob is None else ny_glob
         if m_cls_xp is None or m_tab_xp is None:

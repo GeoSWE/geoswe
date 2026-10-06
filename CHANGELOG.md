@@ -55,6 +55,20 @@ First public release.
 - The compressed forcing setters refuse a bundle attached after the flat build, which nothing
   would have read, and `save_cache` warns about the forcings a cached replay cannot apply
   rather than promising an error it never raised.
+- `Config` range-checks its numbers. It validated nine string enums and no numeric field, so
+  `cfl=5.0` ran to completion with several times the initial mass, `h_min=-1.0` died in
+  complex arithmetic and `g=-9.81` reported a non-finite wave speed and blamed the forcing.
+  `CompressedSolver.from_dense` and `run_cached`, which take the same quantities as floats,
+  apply the same bounds. A rainfall rate above 1e-3 m/s warns about the units.
+- `Solver2D` and `Solver1D` reject a non-finite bed or initial state, with the fill in the
+  message. `read_geotiff` writes NaN for a declared no-data value by default, and one NaN
+  cell used to surface many simulated seconds later as a non-finite wave speed.
+- Gridded rainfall must be `(nt, nx, ny)` on the solver's grid. A transposed `(nt, ny, nx)`
+  array failed on the first step with a bare broadcast error, and a 2-D `(nt, 1)` column
+  broadcast with no error at all and laid rain that was constant in x.
+- `Config` warns when `recon` is set with `well_balanced=True`, where the well-balanced face
+  states discard it. The two examples and two tests that paired them, and so were not the
+  higher-order runs they said they were, now pass `well_balanced=False`.
 
 ## Compatibility promise for 1.x
 
