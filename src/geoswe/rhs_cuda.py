@@ -1694,13 +1694,15 @@ if USING_CUPY:
                         "    rhs2[idx] = rhs_hv;\n")
     _DFSTEP_TAIL_NEW = (
         "    {\n"
+        "        const int interior = (i >= ngh) && (i < nx - ngh) && (j >= ngh) && (j < ny - ngh);\n"
         "        float rr0 = rhs_h;\n"
-        "        // host-side rain, as rain_add_dense: (T)((double)rhs + (double)rate) on masked cells\n"
-        "        if (have_rain) rr0 = (float)((double)rhs_h + (double)rain[(i - ngh) * (ny - 2*ngh) + (j - ngh)]);\n"
+        "        // host-side rain, as rain_add_dense: (T)((double)rhs + (double)rate) on masked cells.\n"
+        "        // `rain` is interior-shaped, so this must be gated on `interior`: the launch covers\n"
+        "        // [2, n-3], and at ngh >= 3 the inner ghost rows would index outside the array.\n"
+        "        if (have_rain && interior) rr0 = (float)((double)rhs_h + (double)rain[(i - ngh) * (ny - 2*ngh) + (j - ngh)]);\n"
         "        float h  = q0[idx] + dt * rr0;\n"
         "        float hu = q1[idx] + dt * rhs_hu;\n"
         "        float hv = q2[idx] + dt * rhs_hv;\n"
-        "        const int interior = (i >= ngh) && (i < nx - ngh) && (j >= ngh) && (j < ny - ngh);\n"
         "        if (interior) {\n"
         "            if (h < h_min) {\n"
         "                h = WETDRY_KEEP_H ? (h > 0.0f ? h : 0.0f) : 0.0f; hu = 0.0f; hv = 0.0f;\n"
@@ -1728,7 +1730,7 @@ if USING_CUPY:
         "            }\n"
         "        }\n"
         "        qn0[idx] = h; qn1[idx] = hu; qn2[idx] = hv;\n"
-        "        if (have_max && h > max_h[idx]) max_h[idx] = h;\n"
+        "        if (have_max && interior && h > max_h[idx]) max_h[idx] = h;\n"
         "    }\n")
     _DENSE_CARRY_SRC = r"""
 #define WETDRY_KEEP_H __WETDRY_KEEP_H__
