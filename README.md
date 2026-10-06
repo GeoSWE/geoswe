@@ -151,10 +151,12 @@ applications is in preparation.
 ## Acknowledgments
 
 This material is based upon work supported by the National Science Foundation
-under Grant No. 2325631 and by a 2025 IDEaS + Cloud Hub award with support from
-Microsoft at the Georgia Institute of Technology. Computing resources were
-provided in part by the Partnership for an Advanced Computing Environment (PACE)
-at Georgia Tech.
+under Grant No. 2325631, by a 2025 IDEaS + Cloud Hub award with support from
+Microsoft at the Georgia Institute of Technology, and by the U.S. Department of
+Energy under Contract No. DE-AC05-00OR22725 in collaboration with Oak Ridge
+National Laboratory. Computing resources were provided in part by the
+Partnership for an Advanced Computing Environment (PACE) at Georgia Tech and by
+the Frontier supercomputer at the Oak Ridge Leadership Computing Facility.
 
 ## License
 
