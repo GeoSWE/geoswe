@@ -27,6 +27,68 @@ jobs:
         env:
           GEOSWE_BACKEND: numpy
 
+  extras:
+    # The ingestion layer (io_geotiff.py, data_prep.py, gauges.py, forcing.py's
+    # pandas constructors) is reachable from no other job, so every test that
+    # touches it is an importorskip that skips: rasterio, pyproj and pandas are
+    # installed nowhere above. One job, not a seventh matrix leg, because these
+    # wheels only need one interpreter to be exercised and they cost minutes on
+    # macOS. It still cannot reach runlib/driver.py, which imports pandas, cupy
+    # and mpi4py at module level by design.
+    name: CPU with the GIS and forcings extras
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      # [test] brings scipy, [io] rasterio and pyproj, [forcings] pandas: the
+      # declared extras, so this job exercises what users install.
+      - run: pip install -e ".[test,io,forcings]"
+      # A wheel that failed to resolve would leave every importorskip skipping
+      # and this job green, which is the hole it exists to close. Fail here.
+      - name: The extras must actually be importable
+        run: |
+          python -c "import pandas, rasterio, pyproj, scipy"
+          python -c "import geoswe.forcing, geoswe.io_geotiff, geoswe.data_prep, geoswe.gauges"
+      # -rs: the skip list is the evidence that the ingestion tests ran.
+      - run: pytest -m "not gpu" -o addopts="" -q -rs
+        env:
+          GEOSWE_BACKEND: numpy
+
+  kernels:
+    # The CUDA kernel sources are compiled by NVRTC at run time, so one that does
+    # not compile fails on the first step of a production run. The only check is
+    # tests/test_gpu_portability.py, which needs a device and so runs in no job
+    # here: this one hands every complete source to nvcc, which needs the toolkit
+    # and no GPU (the test's own constants hold the counts). It is a proxy for
+    # NVRTC, not a replacement for the on-device test (see the module docstring).
+    name: CUDA kernel sources (nvcc, no device)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # nvcc alone, which is a ~200 MB install instead of the whole toolkit;
+      # sub-packages requires method: network. Pinned to a commit, not a tag: a
+      # tag on a third-party action can be moved onto other code, and this one
+      # runs an installer. CUDA 12, not 13: 13.0 dropped Volta, so a 13.x nvcc
+      # rejects the -arch=sm_70 the test asks for first.
+      - uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d   # v0.2.36
+        with:
+          cuda: "12.6.3"
+          method: network
+          sub-packages: '["nvcc"]'
+      # An install that silently did not happen would make the test skip and
+      # this job green, so prove nvcc is there before running it.
+      - run: nvcc --version
+      - run: pip install -e ".[test]"
+      - run: pytest tests/test_kernel_sources_compile.py -o addopts="" -q -rs
+        env:
+          GEOSWE_BACKEND: numpy
+
   examples:
     name: CPU examples
     runs-on: ubuntu-latest

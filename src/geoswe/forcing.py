@@ -10,6 +10,7 @@ This is the minimum operational forcing machinery a flood model needs.
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -27,12 +28,76 @@ def _pandas(who):
     return pandas
 
 
+def _require_time_order(who: str, time_s) -> None:
+    """Raise unless ``time_s`` is non-decreasing, naming the first step back in time.
+
+    Both lookups in this module are bisect-based, so a row out of order does not
+    perturb a result: it selects a different segment and says nothing. Measured
+    on ``RainfallForcing(time_s=[0, 7200, 3600], rate_mm_h=[10, 30, 20])``,
+    t=5400 s returned 10 mm/h where 20 is right; the same scramble in a
+    ``StageBoundary`` returned 1.625 m where 2.5 is right, and the only message
+    it produced blamed CSV coverage, which misdiagnoses it.
+
+    Equal times pass (``< 0``, not ``<= 0``): gauge records repeat a timestamp
+    routinely, and neither lookup is hurt by one. ``rate_at_time`` is piecewise
+    constant and divides by nothing; ``stage_at_time`` interpolates, but brackets
+    with ``bisect_left``, which gives ``t[i-1] < t <= t[i]`` and so never lands
+    inside a run of equal times, leaving its ``t1 - t0`` strictly positive.
+    """
+    # A device-resident time_s is supported: both lookups move it to the host with
+    # .get(), and compressed_solver reads forcing.time_s through its own _host().
+    # np.asarray raises on a CuPy array instead of copying, so without this move a
+    # GPU caller's time_s=cp.asarray([0.0, 60.0]) would stop constructing at all,
+    # with "Implicit conversion to a NumPy array is not allowed" in place of any
+    # message about time order (measured, CuPy 13.6.0).
+    if hasattr(time_s, "get"):
+        time_s = time_s.get()
+    t = np.asarray(time_s, dtype=np.float64).ravel()
+    back = np.nonzero(np.diff(t) < 0.0)[0]
+    if back.size:
+        k = int(back[0])
+        raise ValueError(
+            f"{who}: time_s must be non-decreasing, but time_s[{k + 1}]={t[k + 1]:.6g} "
+            f"< time_s[{k}]={t[k]:.6g} ({back.size} step"
+            f"{'' if back.size == 1 else 's'} back in time). The lookup is a bisect, "
+            f"so an out-of-order time returns another segment's value instead of "
+            f"raising; reorder times and values together, "
+            f"o = np.argsort(time_s, kind='stable'). Equal times are fine.")
+
+
+def _sort_by_time(who: str, time_s, *values):
+    """Order rows read from a file by time, warning when the reorder changes anything.
+
+    The loaders sort, because the file is not the caller's to fix, but they say
+    so: a time column out of order usually means a truncated, concatenated or
+    partly re-downloaded file, and sorting restores the order while recovering
+    none of the rows that are missing. The sort is stable, so rows that share a
+    timestamp keep file order.
+    """
+    t = np.asarray(time_s, dtype=np.float64)
+    back = np.nonzero(np.diff(t) < 0.0)[0]
+    if not back.size:
+        return (t,) + tuple(np.asarray(v) for v in values)
+    k = int(back[0])
+    warnings.warn(
+        f"{who}: the time column is not in order (time_s[{k + 1}]={t[k + 1]:.6g} "
+        f"< time_s[{k}]={t[k]:.6g}, {back.size} row"
+        f"{'' if back.size == 1 else 's'} back in time); sorting by time. Check the "
+        f"file, because sorting cannot recover rows a truncated or partial download "
+        f"left out.",
+        RuntimeWarning, stacklevel=3)
+    order = np.argsort(t, kind="stable")
+    return (t[order],) + tuple(np.asarray(v)[order] for v in values)
+
+
 @dataclass
 class RainfallForcing:
     """Time-varying rainfall forcing.
 
     ``time_s``: 1-D array of times [s] at which rain intensity changes
                 (cell-centred; intensity is constant between consecutive times).
+                Must be non-decreasing: the lookup is a bisect, so a time out of
+                order would read another segment's rate. Equal times are allowed.
     ``rate_mm_h``: rainfall intensity in mm/h.
         - If 1-D of shape (nt,): spatially uniform; each entry is the intensity
           over [time_s[k], time_s[k+1]]. The k-th entry applies until
@@ -59,11 +124,17 @@ class RainfallForcing:
                 f"1-D (nt,) for a uniform rate or 3-D (nt, nx, ny) for a gridded one, in [x, y] "
                 f"order. A 2-D (nt, 1) column -- the df[['rate_mm_h']] double-bracket slip -- "
                 f"broadcasts without any error and lays rain that is constant in x.")
-        if int(self.rate_mm_h.shape[0]) < len(self.time_s):
+        # != rather than <: the lookup clamps its index to len(time_s)-1, so rates
+        # past the last time are unreachable and were accepted in silence (4 rates
+        # against 2 times ran with its third and fourth rates never read, which is
+        # how a time column pasted one row short gets used).
+        if int(self.rate_mm_h.shape[0]) != len(self.time_s):
             raise ValueError(
-                f"RainfallForcing: {len(self.time_s)} times but only "
+                f"RainfallForcing: {len(self.time_s)} times but "
                 f"{int(self.rate_mm_h.shape[0])} rates; give one rate per time "
-                f"(the k-th rate holds from time_s[k] to time_s[k+1], the last one from then on)")
+                f"(the k-th rate holds from time_s[k] to time_s[k+1], the last one from "
+                f"then on, so a rate past the last time is never read)")
+        _require_time_order("RainfallForcing", self.time_s)
 
     @classmethod
     def from_uniform_constant(cls, rate_mm_h: float, t_end: float = 1e9):
@@ -83,13 +154,18 @@ class RainfallForcing:
     def from_time_series_csv(cls, path: str,
                              time_col: str = "time_s",
                              rate_col: str = "rate_mm_h"):
-        """Load a (time, rate) time series from a CSV (uniform in space)."""
+        """Load a (time, rate) time series from a CSV (uniform in space).
+
+        Rows out of time order are sorted here, with a warning naming the first
+        one, since the constructor itself refuses them.
+        """
         pd = _pandas("RainfallForcing.from_time_series_csv")
         df = pd.read_csv(path)
-        return cls(
-            time_s=df[time_col].to_numpy(dtype=np.float64),
-            rate_mm_h=df[rate_col].to_numpy(dtype=np.float64),
-        )
+        time_s, rate_mm_h = _sort_by_time(
+            f"RainfallForcing.from_time_series_csv({path!r})",
+            df[time_col].to_numpy(dtype=np.float64),
+            df[rate_col].to_numpy(dtype=np.float64))
+        return cls(time_s=time_s, rate_mm_h=rate_mm_h)
 
     def rate_at_time(self, t: float):
         """Return rainfall rate in m/s at time t.
@@ -151,7 +227,8 @@ class StageBoundary:
       these are LOCAL padded indices on each rank, so filter to the rank's
       interior+halo region and shift global indices by the rank's ``(i0, j0)``
       origin minus ``ngh`` before constructing the boundary.
-    * ``time_s`` -- 1-D array of times [s] (same convention as RainfallForcing).
+    * ``time_s`` -- 1-D array of times [s] (same convention as RainfallForcing),
+      non-decreasing; equal times are allowed.
     * ``stage_m`` -- 1-D water-surface elevation η in metres (same length as
       ``time_s``); the depth is set so ``h + b = η`` on each marked cell.
     * ``bed_b`` -- bed elevation at each marked cell (1-D, length M), so
@@ -174,6 +251,7 @@ class StageBoundary:
         if len(self.time_s) != len(self.stage_m):
             raise ValueError(f"StageBoundary: {len(self.time_s)} times but "
                              f"{len(self.stage_m)} stage values")
+        _require_time_order("StageBoundary", self.time_s)
 
     @classmethod
     def from_mask(cls, mask, mesh, bed, time_s, stage_m):
@@ -205,6 +283,9 @@ class StageBoundary:
         (e.g. "2024-09-25T00:00:00Z"). Stage values in the CSV are interpreted
         as metres above MSL (NOAA default); they should be converted to the
         DEM's vertical datum (NAVD88 etc.) externally if needed.
+
+        Samples out of time order are sorted here, with a warning naming the
+        first one, since the constructor itself refuses them.
         """
         pd = _pandas("StageBoundary.from_noaa_csv")
         # real CO-OPS CSVs have space-padded headers/values and blank or
@@ -225,8 +306,10 @@ class StageBoundary:
                 f"from_noaa_csv: no finite stage values in {csv_path!r} "
                 f"(column {stage_col!r}) after cleaning; check the CSV contents "
                 f"(a CO-OPS error body or an empty download looks like this)")
+        time_s, stage = _sort_by_time(f"StageBoundary.from_noaa_csv({csv_path!r})",
+                                      time_s[valid], stage[valid])
         return cls(cells=np.asarray(cells, dtype=np.int64),
-                   time_s=time_s[valid], stage_m=stage[valid],
+                   time_s=time_s, stage_m=stage,
                    bed_b=np.asarray(bed_b))
 
     def stage_at_time(self, t: float) -> float:

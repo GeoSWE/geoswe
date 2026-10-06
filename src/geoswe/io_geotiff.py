@@ -9,6 +9,7 @@ Requires ``rasterio`` and ``rioxarray`` (optional geospatial I/O dependencies).
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -125,6 +126,16 @@ def reproject_to_utm(src: GeoArray, dst_crs: str,
 
     bbox = (xmin, ymin, xmax, ymax) in dst CRS units; if None, use src extent
     transformed to dst.
+
+    ``resampling`` is ``"bilinear"`` (the default, for a DEM), ``"nearest"`` or
+    ``"cubic"``. A CATEGORICAL raster (NLCD land cover, soil class) must pass
+    ``resampling="nearest"``: the interpolating kernels average neighbouring
+    class codes, and an average of two codes is not a code. Measured on a 30 m
+    mosaic of codes {11, 21, 24, 41} resampled to 10 m with the default
+    (``tests/test_io_geotiff.py``), the four input codes come out as 23 distinct
+    values, seven of them whole numbers, and ``nlcd_to_manning`` then leaves
+    54.8% of the cells on its default and gives another 25.0% a Manning value
+    from a class the input never held.
     """
     from rasterio.warp import reproject, Resampling, calculate_default_transform
     from rasterio.transform import from_origin
@@ -212,9 +223,47 @@ DEFAULT_MANNING = 0.035
 
 
 def nlcd_to_manning(nlcd: GeoArray, default: float = DEFAULT_MANNING) -> GeoArray:
-    """Map an NLCD land-cover raster (categorical) to a Manning's n raster."""
+    """Map an NLCD land-cover raster (categorical) to a Manning's n raster.
+
+    Code 0 (NLCD NoData) and NaN cells take ``default`` silently, as they do in
+    ``data_prep.landcover_to_manning_on_grid``. Any other cell that matches no
+    class warns, with the fall-through fraction and the commonest unmapped
+    values: that is the signature of a land-cover raster that was resampled with
+    an interpolating kernel, and ``reproject_to_utm`` defaults to one.
+    """
     n = np.full_like(nlcd.data, default, dtype="float64")
+    matched = np.zeros(nlcd.data.shape, dtype=bool)
     for code, manning in NLCD_TO_MANNING.items():
-        n[np.isclose(nlcd.data, code, atol=0.5)] = manning
+        hit = np.isclose(nlcd.data, code, atol=0.5)
+        n[hit] = manning
+        matched |= hit
+    # The fall-through FRACTION is the detector, not the values: on the 30 m
+    # mosaic of {11, 21, 24, 41} in tests/test_io_geotiff.py, bilinearly resampled
+    # to 10 m, 54.8% of the cells match no code, while another 25.0% land within
+    # atol of classes 22, 23 and 31 that the input never held and get a confident
+    # 0.100, 0.120 or 0.022 (the 2:1 blends are exactly 22.0, 23.0 and 31.0).
+    # Rounding with np.rint and a tight atol detects none of it: it partitions the
+    # line exactly as atol=0.5 already does, and a 50/50 blend of 11 and 21 is
+    # 16.0, an unmapped integer either way.
+    mappable = np.isfinite(nlcd.data) & (nlcd.data != 0)
+    unmapped = mappable & ~matched
+    n_unmapped = int(np.count_nonzero(unmapped))
+    n_mappable = int(np.count_nonzero(mappable))
+    if n_unmapped:
+        vals, counts = np.unique(nlcd.data[unmapped], return_counts=True)
+        order = np.argsort(counts)[::-1][:6]          # the commonest few, not every one
+        shown = ", ".join(format(float(vals[k]), "g") for k in order)
+        if vals.size > order.size:
+            shown += f" and {vals.size - order.size} more"
+        warnings.warn(
+            f"nlcd_to_manning: {n_unmapped} of {n_mappable} land-cover cells "
+            f"({100.0 * n_unmapped / n_mappable:.1f}%) match no NLCD class and keep "
+            f"default={default}; commonest unmapped {shown}. Fractional values there mean "
+            f"the raster was interpolated, which also blends neighbouring codes into other "
+            f"classes: resample it with reproject_to_utm(resampling='nearest') or "
+            f"rasterio's Resampling.nearest, which is what "
+            f"data_prep.landcover_to_manning_on_grid uses. Whole numbers mean a code "
+            f"outside the {len(NLCD_TO_MANNING)} NLCD classes this table holds.",
+            stacklevel=2)
     return GeoArray(data=n, dx=nlcd.dx, dy=nlcd.dy,
                     x0=nlcd.x0, y0=nlcd.y0, crs_wkt=nlcd.crs_wkt)
