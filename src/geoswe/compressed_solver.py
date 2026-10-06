@@ -2357,8 +2357,7 @@ def save_cache(cache_dir, *, nbr, is_active, ij_active, nxp, nyp, ngh, dx, x0, y
     infiltration -- a cached replay of a GA / clamp / cross-section run silently omits those
     terms. Use the dense driver path for them (or uniform infiltration for the cached path).
     The karst drain bundle ({idx, h_tgt|h_tgt_arr}) IS persisted when passed via
-    ``drain=``; callers that set a drain but omit it here get a loud error rather than a
-    silent drain-free replay.
+    ``drain=``.
     """
     os.makedirs(cache_dir, exist_ok=True)
     t0 = time.perf_counter()
@@ -2741,6 +2740,40 @@ class CompressedSolver:
             m_cls_xp, m_tab_xp = _manning_table_of(s)
         if s.inside_mask is None:               # no mask: keep every cell
             s.set_inside_mask(cp.ones((s.mesh.nx, s.mesh.ny), dtype=bool))
+        # One scheme, and only one: the flat kernel builds first-order SRM-HLLC face
+        # states and takes a forward-Euler step. `from_dense` reads the CFL number,
+        # gravity, the depth floor, the boundary kind and the Manning table off `s.cfg`
+        # and nothing else, so every other scheme choice there used to run and return
+        # the fixed scheme's answer with no warning. Refuse those instead.
+        # getattr: a caller that spells `dx` out may pass any object with
+        # q/b/sigma/inside_mask and no `.cfg` at all (the trillion-cell scaling
+        # harness does; see the note at the square-cell check below).
+        _cfg = getattr(s, "cfg", None)
+        if _cfg is not None:
+            _fixed = []
+            if getattr(_cfg, "recon", "first") != "first":
+                _fixed.append(f"recon={_cfg.recon!r} (the flat face states are first order)")
+            if getattr(_cfg, "time", "euler") != "euler":
+                _fixed.append(f"time={_cfg.time!r} (the flat step is forward Euler)")
+            if getattr(_cfg, "flux", "hllc") != "hllc":
+                _fixed.append(f"flux={_cfg.flux!r} (the flat kernel solves HLLC)")
+            if not getattr(_cfg, "well_balanced", True):
+                _fixed.append("well_balanced=False (the flat kernel is always well balanced)")
+            if getattr(_cfg, "wb_method", "srm") != "srm":
+                _fixed.append(f"wb_method={_cfg.wb_method!r} (the flat kernel uses the SRM)")
+            if getattr(_cfg, "pde", "baseline") != "baseline":
+                _fixed.append(f"pde={_cfg.pde!r} (the flat path packs sigma once and never "
+                              f"re-solves it, so the IGR terms would freeze at their t=0 values)")
+            if getattr(_cfg, "stage_boundary", None) is not None:
+                _fixed.append("stage_boundary (not carried over; the flat path prescribes a "
+                              "water level through the gauge ring the run driver builds)")
+            if _fixed:
+                raise ValueError(
+                    "CompressedSolver.from_dense: the compressed mesh runs one scheme, "
+                    "first-order SRM-HLLC face states with forward Euler, and these Config "
+                    "choices cannot be honoured: " + "; ".join(_fixed)
+                    + ". Run them on the dense Solver2D, or leave them at their defaults in "
+                    "the Config you pass here.")
         if _short and (s.cfg.bc_x != "fall" or s.cfg.bc_y != "fall"):
             import warnings
             warnings.warn(
@@ -2844,6 +2877,19 @@ class CompressedSolver:
         self.nx_orig = int(nx_orig) if nx_orig is not None else int(nx_glob)
         self.ny_orig = int(ny_orig) if ny_orig is not None else int(ny_glob)
         self.gauge_every_s = float(gauge_every_s)
+        # Friction settings the flat kernel does take, and used to drop: the velocity
+        # cap and the quadratic-alpha root reached the stepper at its own defaults.
+        # The env switch keeps precedence (pass None and the stepper reads it), as it
+        # does on the driver path, where it is folded into the Config.
+        self.vcap = float(getattr(_cfg, "friction_velocity_cap_ms", 15.0)) if _cfg is not None else 15.0
+        _env_quad = os.environ.get("GEOSWE_FRICTION_QUAD", os.environ.get("SWE_FRICTION_QUAD"))
+        self.use_quad = (None if (_env_quad is not None or _cfg is None)
+                         else bool(getattr(_cfg, "friction_quadratic_alpha", True)))
+        # Rain is not carried over (it is attached with set_rain), so remember whether
+        # the dense Config asked for any: run() warns when it did and none was attached.
+        self._dense_had_rain = bool(_cfg is not None and (
+            getattr(_cfg, "rainfall_forcing", None) is not None
+            or float(getattr(_cfg, "rainfall", 0.0) or 0.0) > 0.0))
         self._ring_raw = self._sponge_raw = self._rain_raw = None
         self._drain = self._infil = None
         self._ga_drain_raw = self._clamp_raw = self._cs_raw = None
@@ -2858,12 +2904,30 @@ class CompressedSolver:
     # self, so a run is assembled as a chain (set_ring(...).set_rain(...).run(...)).
     # The bundles are converted to flat, per-rank arrays exactly once, in
     # _ensure_flat(), which save_cache() and run() both call first.
-    def set_ring(self, ring):     self._ring_raw = ring;     return self
-    def set_sponge(self, sponge): self._sponge_raw = sponge; return self
+    def _require_unbuilt(self, who):
+        """Refuse a forcing attached after the flat bundles were built.
+
+        ``_ensure_flat`` converts these bundles exactly once and returns early
+        afterwards, so a setter called after ``save_cache()`` or ``run()`` stored a
+        bundle that nothing ever read: the second run was silently missing the
+        forcing. ``set_drain``, ``set_infil``, ``add_inflow`` and
+        ``enable_max_depth`` are read at ``run()`` time and are not restricted.
+        """
+        if getattr(self, "_flat_built", False):
+            raise RuntimeError(
+                f"CompressedSolver.{who}: the flat forcing bundles were already built "
+                f"(by an earlier run() or save_cache()), and this one would never be read. "
+                f"Attach the forcings before the first run, or build a fresh solver.")
+
+    def set_ring(self, ring):
+        self._require_unbuilt("set_ring");     self._ring_raw = ring;     return self
+    def set_sponge(self, sponge):
+        self._require_unbuilt("set_sponge");   self._sponge_raw = sponge; return self
     def set_rain(self, rain):
         """Attach rainfall: a :class:`~geoswe.RainfallForcing` (uniform, or one
         ``(nx, ny)`` frame per time), or the bundle the run driver builds for a
         gridded product on its native grid (``native_rate_dev``, ``lookup_dev``, ``t_s``)."""
+        self._require_unbuilt("set_rain")
         if rain is not None and not isinstance(rain, dict):
             rain = self._rain_bundle(rain)
         self._rain_raw = rain
@@ -2899,12 +2963,17 @@ class CompressedSolver:
             t_series=t_series, q_series=q_series)]
         return self
 
+    # read at run() time, so they also take effect after the flat build -- and are
+    # therefore absent from a cache written before they were set (see save_cache)
     def set_drain(self, drain):   self._drain = drain;       return self  # {idx,h_tgt|h_tgt_arr} karst cap (florida)
     def set_infil(self, infil):   self._infil = infil;       return self  # {tab} const-rate (florida)
     # Pinellas calibration forcings (raw dense PADDED fields / global pixel lists; flattened below):
-    def set_ga_drain(self, b):    self._ga_drain_raw = b;    return self  # {cls_pad,Ks_t,psi_t,dth_t,F_pad,Fmax_pad?,inv_tau_pad?,mode}
-    def set_clamp(self, b):       self._clamp_raw = b;       return self  # {rows,cols,hmax} local-padded
-    def set_cross_sections(self, b): self._cs_raw = b;       return self  # {pix_i_loc,pix_j_loc,global_idx,offsets,bed_mean,dx,gauge_names,n_pix_total}
+    def set_ga_drain(self, b):
+        self._require_unbuilt("set_ga_drain");     self._ga_drain_raw = b; return self  # {cls_pad,Ks_t,psi_t,dth_t,F_pad,Fmax_pad?,inv_tau_pad?,mode}
+    def set_clamp(self, b):
+        self._require_unbuilt("set_clamp");        self._clamp_raw = b;    return self  # {rows,cols,hmax} local-padded
+    def set_cross_sections(self, b):
+        self._require_unbuilt("set_cross_sections"); self._cs_raw = b;     return self  # {pix_i_loc,pix_j_loc,global_idx,offsets,bed_mean,dx,gauge_names,n_pix_total}
     def enable_max_depth(self, on=True): self._max_depth = bool(on); return self
 
     @property
@@ -2988,7 +3057,27 @@ class CompressedSolver:
         cp.get_default_memory_pool().free_all_blocks()
 
     def save_cache(self, cache_dir):
-        """Write the flat mesh, state, bed, roughness and forcing bundles to ``cache_dir`` (per-rank ``r##`` subdirectories under MPI) for later ``run_cached`` loads."""
+        """Write the flat mesh, state, bed, roughness and forcing bundles to ``cache_dir`` (per-rank ``r##`` subdirectories under MPI) for later ``run_cached`` loads.
+
+        The ring, sponge, rain and karst-drain bundles are persisted. Green-Ampt
+        infiltration, the stage clamp and the cross-section gauges are not, and
+        ``run_cached`` cannot apply them: a replay of a run that used them omits those
+        terms, which changes the trajectory. This warns for the two that do (Green-Ampt,
+        the clamp); the cross sections only sample. Forcings set after this call, and
+        the ``set_drain``/``set_infil`` bundles read at ``run()`` time, are not in the
+        file either.
+        """
+        if self._ga_drain_raw is not None or self._clamp_raw is not None:
+            import warnings
+            _omitted = [n for n, v in (("Green-Ampt infiltration (set_ga_drain)", self._ga_drain_raw),
+                                       ("the stage clamp (set_clamp)", self._clamp_raw))
+                        if v is not None]
+            warnings.warn(
+                f"CompressedSolver.save_cache: {' and '.join(_omitted)} cannot be written to a "
+                f"cache, and run_cached cannot apply {'them' if len(_omitted) > 1 else 'it'}. The "
+                f"replay will take a different trajectory from this run. Use the dense driver "
+                f"path for a run that needs them.",
+                stacklevel=2)
         self._ensure_flat()
         comm = self.comm
         _cdir = (os.path.join(cache_dir, f"r{comm.rank:02d}")
@@ -3048,6 +3137,13 @@ class CompressedSolver:
             # The depth maps are written after the last step, so check now rather
             # than losing a long run at the end. Frames fail at the first frame.
             _require_geotiff_writer()
+        if self._rain_raw is None and getattr(self, "_dense_had_rain", False):
+            import warnings
+            warnings.warn(
+                "CompressedSolver.run: the dense Config asked for rainfall and none was "
+                "attached here. from_dense does not carry rainfall over; pass the same "
+                "RainfallForcing to set_rain() before running, or this run gets no rain.",
+                stacklevel=2)
         self._ensure_flat()
         sig_f, inv_sig_f = self.sig_f, self.inv_sig_f
         if self.no_sigma:                               # release the Σ arrays before the loop (ns kernels ignore them)
@@ -3056,7 +3152,9 @@ class CompressedSolver:
             cp.get_default_memory_pool().free_all_blocks()
         st = CompressedStepper(N=self.cs.N_stored, nbr=self.nbr, is_active=self.is_active, g=self.g,
                                h_min=self.h_min, dx=self.dx, cfl=self.cfl, no_sigma=self.no_sigma,
-                               cfl_no_sigma=self.cfl_no_sigma, cfl_linf=self.cfl_linf)
+                               cfl_no_sigma=self.cfl_no_sigma, cfl_linf=self.cfl_linf,
+                               vcap=getattr(self, "vcap", 15.0),
+                               use_quad=getattr(self, "use_quad", None))
         # Rain on a dry bed: no wave speed limits the step, so bound it by the CFL step of the
         # film the rain lays down, dt <= (cfl*dx)**(2/3) / (g*R)**(1/3), with R the largest
         # rate of the table. Far above the step of any wet run, where it changes nothing.

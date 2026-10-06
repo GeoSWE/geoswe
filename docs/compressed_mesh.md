@@ -44,11 +44,19 @@ print(cs.n_active, "active of", nx * ny, "cells;", cs.n_stored, "stored")
 
 What to know:
 
+- **One scheme.** The flat kernel builds first-order SRM-HLLC face states and
+  takes a forward-Euler step. That is the whole scheme: `recon`, `time`, `flux`,
+  `well_balanced` and `wb_method` have no compressed variants, so `from_dense`
+  raises rather than return the fixed scheme's answer under another name. Run a
+  method study on the dense {py:class}`~geoswe.Solver2D`.
 - **What is carried over.** `from_dense` reads the grid, the CFL number, the
-  wet/dry floor, gravity, the Manning roughness, the bed and the initial state
-  from the dense solver. With no mask set, every cell is active. Rainfall is
-  attached with `set_rain`, which takes the same
-  {py:class}`~geoswe.RainfallForcing`.
+  wet/dry floor, gravity, the Manning roughness (with its velocity cap and
+  friction root), the bed and the initial state from the dense solver. With no
+  mask set, every cell is active. Rainfall is attached with `set_rain`, which
+  takes the same {py:class}`~geoswe.RainfallForcing`; `Config.rainfall_forcing`
+  is not carried over, and a run warns when the dense Config asked for rain and
+  none was attached. `Config.stage_boundary` has no equivalent here: a
+  prescribed water level comes from the gauge ring the run driver builds.
 - **The edge.** The active set is surrounded by a two-cell **ghost halo** that
   keeps the state it had in the dense solver. For a dry start the halo is dry,
   so water that reaches the edge of the active set leaves it, as with the dense

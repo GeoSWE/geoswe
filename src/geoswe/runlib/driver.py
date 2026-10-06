@@ -1388,9 +1388,23 @@ def main(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype="float64",
         if sponge_applies:
             cso.set_sponge(dict(keep=keep_field, amb=amb_h))
             keep_field = None; amb_h = None
+        # Three rain objects reach this point and all three must be handled. The
+        # `hasattr` test alone matched only the native-grid product, so the default
+        # uniform RainfallForcing and the regridded device forcing fell through it and
+        # the run laid no rain at all, with no message.
         if hasattr(rain, "_rate_dev") and hasattr(rain, "_lookup_dev"):
             cso.set_rain(dict(native_rate_dev=rain._rate_dev, lookup_dev=rain._lookup_dev,
                               t_s=rain.time_s))
+        elif isinstance(rain, RainfallForcing):
+            cso.set_rain(rain)             # uniform: set_rain makes it a one-column table
+        elif rain is not None:
+            raise ValueError(
+                "--compressed cannot carry this rainfall product: the npz held 'rate_ms', one "
+                "frame per time already regridded onto the solver grid, and the flat path reads "
+                "rain through a native-grid table plus a per-cell lookup. Materialising that "
+                "table here would cost one float per cell per frame. Pass the npz with "
+                "'native_rate_ms' and 'lookup_native_ij' (the native-resolution form), or run "
+                "it on the dense path without --compressed.")
         # uniform landcover recession sink (env-gated, mirrors run_cached):
         # SWE_INFIL_MMHR mm/h on land, 0 over open water (n=0.025). Run with
         # GEOSWE_GA=0 to reproduce the Florida application's loss budget here.

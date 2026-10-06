@@ -134,7 +134,7 @@ from geoswe import CompressedSolver
 ii, jj = np.meshgrid(np.arange(nx), np.arange(ny), indexing="ij")
 study_area = np.hypot(ii - nx / 2, jj - ny / 2) < 50      # boolean (nx, ny): a disc here
 
-cfg = Config(friction="manning", bc_x="fall", bc_y="fall", rainfall_forcing=rain)
+cfg = Config(friction="manning", bc_x="fall", bc_y="fall")   # the rain goes to `cs`, below
 solver = Solver2D(mesh, cfg, np.zeros((3, nx, ny)), bed)
 solver.set_manning(manning)
 solver.set_inside_mask(study_area)           # the cells to keep

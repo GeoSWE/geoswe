@@ -43,6 +43,18 @@ First public release.
 - `Config(pde="igr")` is rejected unless `GEOSWE_ENABLE_IGR=1`. The entropic-pressure model is
   research code with no test coverage, and at the default `alpha=0` it was silently identical
   to `pde="baseline"`.
+- The run driver carries its rainfall to the compressed solver. Only the native-grid spatial
+  product reached it, so a `--compressed` run with the default uniform rainfall laid no rain
+  at all and reported a plausible-looking result; a regridded spatial product now raises
+  instead of being dropped.
+- `CompressedSolver.from_dense` refuses the scheme choices the flat kernel cannot represent
+  (`recon`, `time`, `flux`, `well_balanced`, `wb_method`, `pde`, `stage_boundary`) instead of
+  returning the fixed scheme's answer under another name, and it now carries the two friction
+  settings it can honour: `friction_velocity_cap_ms` and `friction_quadratic_alpha` reached
+  the flat kernel at its own defaults.
+- The compressed forcing setters refuse a bundle attached after the flat build, which nothing
+  would have read, and `save_cache` warns about the forcings a cached replay cannot apply
+  rather than promising an error it never raised.
 
 ## Compatibility promise for 1.x
 

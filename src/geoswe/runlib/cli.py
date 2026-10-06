@@ -87,7 +87,9 @@ def build_parser(extra=None):
                     help="If >0, run exactly N steps with fixed dt=0.3 (debug)")
     ap.add_argument("--compressed", action="store_true",
                     help="Opt-in: run the flat compressed-mesh step loop (geoswe.compressed_solver) "
-                         "instead of the dense loop. Default OFF -> unchanged dense path.")
+                         "instead of the dense loop. Default OFF -> unchanged dense path. One "
+                         "scheme only (first-order SRM-HLLC + forward Euler), and --h-min-cfl "
+                         "has no effect on it (SWE_HMIN_CFL does).")
     ap.add_argument("--cache-save", default=None,
                     help="With --compressed: also save the flat structures to this dir (for --cache replay).")
     ap.add_argument("--cache", default=None,
@@ -107,7 +109,8 @@ def build_parser(extra=None):
                          "physics --h-min. Default None -> 0.0 -> use --h-min for the CFL too "
                          "(byte-identical). Set e.g. 1e-3 to drop near-dry films from dt while "
                          "physics keeps the small --h-min (e.g. 1e-6). Tests whether dt can be "
-                         "cheaper without breaking the burned-channel stage calibration.")
+                         "cheaper without breaking the burned-channel stage calibration. Dense "
+                         "path only: on --compressed the floor comes from SWE_HMIN_CFL.")
     ap.add_argument("--storage-courant", type=float, default=0.0,
                     help="Storage curve for --channel-width-npz: the 1/sigma storage scaling holds "
                          "up to the depth h* where still water reaches this storage-scaled Courant "
