@@ -12,7 +12,6 @@ passes empty arrays and must not reduce over them.
 Prints DELIVERED <ratio>; the caller asserts on it.
 """
 import os
-import sys
 import tempfile
 
 os.environ.setdefault("GEOSWE_BACKEND", "cupy")
