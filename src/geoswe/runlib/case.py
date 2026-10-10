@@ -67,6 +67,12 @@ def load_case(case_path, bc_path, *, dtype="float32", nhd_path=None, channel_bed
                 nhd_glob = creek_mask.astype(np.bool_)
                 bed_before = bed.copy()
                 eligible = creek_mask & (bed_before < burn_elev_cutoff_m)
+                n_creek, n_elig = int(creek_mask.sum()), int(eligible.sum())
+                if n_creek and n_elig < 0.5 * n_creek:
+                    say(f"  ! NHD burn: burn_elev_cutoff_m={burn_elev_cutoff_m} skips "
+                        f"{100 * (1 - n_elig / n_creek):.0f}% of the creek mask "
+                        f"({n_elig:,} of {n_creek:,} cells burned); raise it to reach "
+                        f"channels above that elevation")
                 target = np.maximum(bed_before - burn_max_drop_m, burn_target_m)
                 bed = np.where(eligible, np.minimum(bed_before, target), bed_before)
 

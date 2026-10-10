@@ -1541,6 +1541,44 @@ def _write_depth_tifs(out_dir, *, max_h_flat, q0, ij_active, nxp, nyp, ngh, nx_g
     say(f"  [compressed] wrote {' + '.join(fname[f] + '.tif' for f in fields)}{mx}")
 
 
+def _inlet_dry_seed(infl, bed_f, comm):
+    """Per-inlet seed for a dry cross-section, built once from the bed.
+
+    The reductions are global: a cross-section that spans ranks has to be weighted against
+    one minimum, and a rank holding none of an inlet must not reduce over its empty slice.
+    """
+    n = len(infl)
+    if n == 0:
+        return
+    mpi = comm is not None and comm.size > 1
+    if mpi:
+        from mpi4py import MPI as _M
+    ext = np.empty((n, 2), np.float64)          # (zmin, -zmax), so one MIN covers both
+    for k, f in enumerate(infl):
+        zb = bed_f[f["a"]]
+        ext[k] = (float(zb.min()), -float(zb.max())) if zb.size else (np.inf, np.inf)
+    if mpi:
+        out = np.empty_like(ext)
+        comm.Allreduce(ext, out, op=_M.MIN)
+        ext = out
+    agg = np.zeros((n, 2), np.float64)          # (cells at the minimum, deepest seed)
+    for k, f in enumerate(infl):
+        zmin, zmax = float(ext[k, 0]), float(-ext[k, 1])
+        zb = bed_f[f["a"]]
+        f["h_dry"] = cp.maximum(np.float32(zmin + 0.10 * (zmax - zmin)) - zb, 0.0)
+        f["low"] = zb <= np.float32(zmin)
+        agg[k] = (float(f["low"].sum()),
+                  float(f["h_dry"].max()) if zb.size else -np.inf)
+    if mpi:
+        sm = np.empty(n); comm.Allreduce(np.ascontiguousarray(agg[:, 0]), sm, op=_M.SUM)
+        mx = np.empty(n); comm.Allreduce(np.ascontiguousarray(agg[:, 1]), mx, op=_M.MAX)
+        agg[:, 0], agg[:, 1] = sm, mx
+    for k, f in enumerate(infl):
+        f["nlow"] = float(agg[k, 0]) or 1.0
+        f["flat"] = bool(agg[k, 1] <= 0.0)
+        f["w_dry"] = cp.where(f["low"], np.float32(1.0 / f["nlow"]), np.float32(0.0))
+
+
 def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
                ij_active, nxp, nyp, ngh, dx, x0, y0, crs_wkt, nx_glob, ny_glob,
                ring, sponge, rain, out_dir, t_end, frame_every_s, mpi=None,
@@ -1566,7 +1604,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
     else:
         i0r, j0r, nxl, nyl = 0, 0, nx, ny
 
-    ring_on = ring is not None
+    ring_on = ring is not None and int(ring.get("n", 0)) > 0
     if ring_on:
         rkern = raw_kernel(_ring_flat_src(ring["NG"]), "ring_bc_flat")
         rflat = ring["rflat"]; rbed = ring["rbed"]; rwg = ring["rwg"]; nring = int(ring["n"])
@@ -2022,6 +2060,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
                           t=np.asarray(f["t_series"], np.float64),
                           q=np.asarray(f["q_series"], np.float64)))
     if _infl:
+        _inlet_dry_seed(_infl, bed_f, comm)
         say(f"  [bc] {len(_infl)} discharge inlet(s), "
             f"{sum(int(f['g'].size) for f in _infl)} ghost cells total")
 
@@ -2097,15 +2136,11 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
                 if ssum > 0.0:
                     w = h_a / np.float32(ssum); h_face = h_a
                 else:                                        # dry cross-section
-                    zb = bed_f[f["a"]]
-                    zmin = float(zb.min()); zmax = float(zb.max())
-                    h_face = cp.maximum(np.float32(zmin + 0.10*(zmax - zmin)) - zb, 0.0)
-                    low = (zb <= np.float32(zmin))
-                    nlow = float(low.sum()) or 1.0
-                    if float(h_face.max()) <= 0.0:           # FLAT inlet -> critical depth
-                        qc = abs(Q) / (nlow * f["ds"])
+                    h_face = f["h_dry"]
+                    if f["flat"]:                            # critical depth carries q
+                        qc = abs(Q) / (f["nlow"] * f["ds"])
                         h_face = h_face + np.float32((qc*qc/9.80665) ** (1.0/3.0))
-                    w = cp.where(low, np.float32(1.0/nlow), np.float32(0.0))
+                    w = f["w_dry"]
                 qn = (np.float32(Q / f["ds"]) * w).astype(cp.float32)
                 q0[f["g"]] = h_face.astype(cp.float32)
                 q1[f["g"]] = (qn * np.float32(f["nx"])).astype(cp.float32)
@@ -3118,13 +3153,25 @@ class CompressedSolver:
             raise ValueError(f"set_rain: rate_mm_h must have shape (nt,) or (nt, {nx}, {ny}); "
                              f"got {tuple(rate.shape)}")
         return dict(native_rate_dev=table, lookup_dev=lookup, t_s=t_s)
+    def ghost_boundary_pairs(self):
+        """Ghost cells on the active boundary and their active neighbours, as flat indices.
+
+        The pairing :meth:`add_inflow` wants: pass the subset that is the river mouth.
+        Safe to call at any point; it does not build the flat forcing bundles, so the
+        setters that have to precede that build still work afterwards.
+        """
+        return _build_ghost_bc(self.nbr, self.is_active, int(self.is_active.size))
+
     def add_inflow(self, ghost_idx, nbr_idx, normal, ds, t_series, q_series):
         """Add one discharge (hydrograph) inlet; call once per river.
 
-        ``ghost_idx`` are flat indices of the inlet's GHOST cells and
-        ``nbr_idx`` their active neighbours (the pairing `_build_ghost_bc`
-        produces -- pass the subset that is the river mouth). Each inlet keeps
-        its own normal, width and hydrograph.
+        ``ghost_idx`` are flat indices of the inlet's GHOST cells and ``nbr_idx`` their
+        active neighbours: take both from :meth:`ghost_boundary_pairs` and pass the subset
+        that is the river mouth. ``normal`` is the inward unit normal and must be
+        axis-aligned; ``ds`` is the cell width. Each inlet keeps its own hydrograph.
+
+        Under MPI every rank passes every inlet, in the same order; a rank holding none of
+        one passes empty index arrays.
         """
         self._inflows = getattr(self, "_inflows", []) + [dict(
             ghost_idx=ghost_idx, nbr_idx=nbr_idx, normal=normal, ds=ds,
@@ -3142,7 +3189,15 @@ class CompressedSolver:
         self._require_unbuilt("set_clamp");        self._clamp_raw = b;    return self  # {rows,cols,hmax} local-padded
     def set_cross_sections(self, b):
         self._require_unbuilt("set_cross_sections"); self._cs_raw = b;     return self  # {pix_i_loc,pix_j_loc,global_idx,offsets,bed_mean,dx,gauge_names,n_pix_total}
-    def enable_max_depth(self, on=True): self._max_depth = bool(on); return self
+    def enable_max_depth(self, on=True):
+        """Track the per-cell maximum depth over the run, written as ``max_depth``.
+
+        It is an envelope, not a snapshot: each cell holds its own peak, reached at its own
+        time, so summing it over the grid is not a water volume. Use a frame, or
+        ``final_depth``, for anything that has to balance.
+        """
+        self._max_depth = bool(on)
+        return self
 
     @property
     def n_active(self):
