@@ -40,6 +40,10 @@ def _run(env, env_extra=None):
         pytest.skip("no MPI launcher on PATH")
     env = dict(env)
     env["PATH"] = os.path.dirname(launcher) + os.pathsep + env.get("PATH", "")
+    # a site whose Python ships its own libmpi needs the launcher's one preloaded, and
+    # gpu_child_env does not carry LD_PRELOAD
+    if os.environ.get("LD_PRELOAD"):
+        env["LD_PRELOAD"] = os.environ["LD_PRELOAD"]
     env.update(env_extra or {})
     r = subprocess.run([launcher, "-n", "2", sys.executable, "-m", "mpi4py", str(SCRIPT)],
                        capture_output=True, text=True, env=env, timeout=900)
