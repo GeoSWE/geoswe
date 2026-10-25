@@ -31,15 +31,36 @@
 # instead of halving the run.  The smaller points are always powers of two.
 #
 # Python at a thousand ranks is slow to start from a shared home directory, so the
-# environment and the sources are unpacked onto every node first when STAGE_TAR exists:
+# environment and the sources are unpacked onto every node first when STAGE_TAR exists
+# (broadcast with sbcast from SBCAST_FROM nodes on, 256 by default). A kernel_cache/ in the
+# tarball becomes the node-local CuPy cache, so tens of thousands of ranks do not read
+# their compiled kernels from Lustre:
 #
 #   tar -C "$GEOSWE_REPO" -cf "$GEOSWE_SCRATCH/stage/geoswe-stage.tar" \
 #       .venv src benchmark/scaling_640m benchmark/frontier_amd
+#   tar -C "$GEOSWE_SCRATCH" -rf "$GEOSWE_SCRATCH/stage/geoswe-stage.tar" kernel_cache/.venv
+#
+# LEAN=1 (default) builds each rank's mesh in closed form (GEOSWE_RECT_FASTBUILD: the strip is
+# one full rectangle) and keeps its index arrays on the host (GEOSWE_FROMDENSE_HOST_INDEX), as a
+# run from a cache does: seconds instead of minutes of build, 38 instead of 51 B/cell of device
+# memory at the start of stepping, so a GCD holds 1.6 billion cells (NX=51200). The step is
+# bit-identical either way (tests/test_gpu_rect_fastbuild.py); LEAN=0 is the earlier build.
+#
+# SCREEN=1 first loads every GCD of the usable nodes for SCREEN_SECONDS (180) on its own
+# (screen_gcds.py, SCREEN_NX x 32000 cells, no MPI coupling) and leaves out the nodes whose
+# slowest GCD is more than SCREEN_TOL (0.025) above the median of the last minute, or did
+# not answer: a card that slows down after minutes of load holds back the whole lockstep
+# run (2026-10-24: 97 % to 90 % of one GCD within four minutes at 4,096 GCDs).
+#
+# WAVE1=0 skips the smaller points: the run is the full point alone, with the one-GCD and
+# one-node baselines on two spare nodes at the same time (so ask for at least two more nodes
+# than USE_NODES). For the largest runs, where wave 1 would double the node-hours.
 cd "${SLURM_SUBMIT_DIR:?submit with sbatch from the repository root}"
 source benchmark/frontier_amd/env.sh        # before `set -u`: the module command trips it
 set -uo pipefail
 NX="${NX:-31250}"; NY="${NY:-32000}"         # one billion cells; NY stays under the int16 row limit
-STEP_MINUTES="${STEP_MINUTES:-13}"
+STEP_MINUTES="${STEP_MINUTES:-20}"
+LEAN="${LEAN:-1}"; WAVE1="${WAVE1:-1}"; SCREEN="${SCREEN:-0}"
 GCDS="${GCDS_PER_NODE:-8}"
 T_TIME="${T_TIME:-300}"; REPEATS="${REPEATS:-1}"
 CAL_SECONDS="${CAL_SECONDS:-30}"; CAL_LAST="${CAL_LAST:-0}"
@@ -65,11 +86,23 @@ STAGE_TAR="${STAGE_TAR:-$GEOSWE_SCRATCH/stage/geoswe-stage.tar}"
 LOCAL=/tmp/$USER-geoswe-stage
 if [ -f "$STAGE_TAR" ]; then
   t0=$SECONDS
-  srun -N "$NA" -n "$NA" --ntasks-per-node=1 -t 3 bash -c \
-    "mkdir -p $LOCAL $AMD_COMGR_CACHE_DIR && tar -xf $STAGE_TAR -C $LOCAL" \
-    || echo "!! staging did not finish on every node: the node check drops the ones it missed"
+  if (( NA >= ${SBCAST_FROM:-256} )); then        # a tree broadcast instead of NA reads of one Lustre file
+    TMPTAR=/tmp/$USER-geoswe-stage-$SLURM_JOB_ID.tar
+    sbcast -f "$STAGE_TAR" "$TMPTAR" || echo "!! sbcast did not finish: the node check drops the nodes it missed"
+    srun -N "$NA" -n "$NA" --ntasks-per-node=1 -t 5 bash -c \
+      "mkdir -p $LOCAL $AMD_COMGR_CACHE_DIR && tar -xf $TMPTAR -C $LOCAL && rm -f $TMPTAR" \
+      || echo "!! staging did not finish on every node: the node check drops the ones it missed"
+  else
+    srun -N "$NA" -n "$NA" --ntasks-per-node=1 -t 3 bash -c \
+      "mkdir -p $LOCAL $AMD_COMGR_CACHE_DIR && tar -xf $STAGE_TAR -C $LOCAL" \
+      || echo "!! staging did not finish on every node: the node check drops the ones it missed"
+  fi
   PY="$LOCAL/.venv/bin/python"; ROOT="$LOCAL"
   echo "staged $(du -h "$STAGE_TAR" | cut -f1) onto $NA nodes in $((SECONDS - t0)) s"
+  if tar -tf "$STAGE_TAR" "kernel_cache/$(basename "$GEOSWE_VENV")" > /dev/null 2>&1; then
+    export CUPY_CACHE_DIR="$LOCAL/kernel_cache/$(basename "$GEOSWE_VENV")"
+    echo "node-local CuPy kernel cache: $CUPY_CACHE_DIR"
+  fi
 else
   srun -N "$NA" -n "$NA" --ntasks-per-node=1 -t 3 mkdir -p "$AMD_COMGR_CACHE_DIR"
   PY=python; ROOT="$GEOSWE_REPO"
@@ -87,13 +120,76 @@ for h in "${ALLOC[@]}"; do
   if [ "$got" = "$GCDS" ]; then ALL+=("$h"); else echo "!! node $h dropped: ${got:-no answer}, not $GCDS usable GCDs"; fi
 done
 [ "${#ALL[@]}" -gt 0 ] || { echo "no usable node"; cat "$RUN/nodes.err"; exit 3; }
+if [ "$SCREEN" = 1 ]; then
+  echo; echo "=== screening ${#ALL[@]} nodes, every GCD on its own under load for ${SCREEN_SECONDS:-180} s, $(date +%T) ==="
+  t0=$SECONDS
+  srun -l -N "${#ALL[@]}" -n $(( ${#ALL[@]} * GCDS )) --ntasks-per-node="$GCDS" -w "$(IFS=,; echo "${ALL[*]}")" \
+       -c 7 --gpus-per-task=1 --gpu-bind=closest -t $(( ${SCREEN_SECONDS:-180} / 60 + 6 )) \
+       env GEOSWE_RECT_FASTBUILD=1 GEOSWE_FROMDENSE_HOST_INDEX=1 SWE_FROMDENSE_SIGMA_DUMMY=1 \
+       "$PY" "$ROOT/benchmark/frontier_amd/screen_gcds.py" --nx "${SCREEN_NX:-16384}" \
+       --seconds "${SCREEN_SECONDS:-180}" --last 60 > "$RUN/screen.log" 2>&1
+  "$PY" - "$RUN/screen.log" "${SCREEN_TOL:-0.025}" "$GCDS" "${ALL[@]}" > "$RUN/screen_keep.txt" 2> "$RUN/screen_summary.txt" <<'PY'
+import re, statistics, sys
+log, tol, per, hosts = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), sys.argv[4:]
+pat = re.compile(r"\[screen\] task (\d+) host (\S+) gcd (\S+) ok (\d) ms_first (\S+) ms_last (\S+) "
+                 r"junction (\S+) power (\S+) sclk (\S+) sclk_min (\S+)")
+res = {}
+for line in open(log):
+    m = pat.search(line)
+    if m:
+        t, h, g, ok, f, l, j, pw, sc, scm = m.groups()
+        res[int(t)] = (h, g, int(ok), float(f), float(l), float(j), float(pw), float(sc), float(scm))
+good = [v for v in res.values() if v[2] == 1 and v[4] == v[4]]
+med = statistics.median(v[4] for v in good) if good else float("nan")
+by_host = {}
+for v in res.values():
+    by_host.setdefault(v[0], []).append(v)
+keep, drop = [], []
+for h in hosts:
+    vs = by_host.get(h, [])
+    oks = [v for v in vs if v[2] == 1 and v[4] == v[4]]
+    worst = max((v[4] for v in oks), default=float("nan"))
+    if len(oks) < per:
+        drop.append((h, f"{len(oks)} of {per} GCDs answered"))
+    elif worst > med * (1 + tol):
+        drop.append((h, f"slowest GCD {worst:.2f} ms/step, {100 * (worst / med - 1):+.2f} % on the median"))
+    else:
+        keep.append(h)
+print("\n".join(keep))
+ls = sorted(v[4] for v in good)
+q = lambda p: ls[min(len(ls) - 1, int(p * len(ls)))] if ls else float("nan")
+print(f"screening: {len(good)} GCDs answered of {per * len(hosts)}; last minute median {med:.2f} ms/step, "
+      f"p99 {q(0.99):.2f}, slowest {ls[-1] if ls else float('nan'):.2f}; tolerance {100 * tol:.1f} %; "
+      f"{len(drop)} node(s) left out, {len(keep)} kept", file=sys.stderr)
+for h, why in drop[:40]:
+    print(f"  left out {h}: {why}", file=sys.stderr)
+print("  slowest GCDs (host gcd first-minute last-minute ms/step, junction C, power W, sclk MHz, min sclk):", file=sys.stderr)
+for v in sorted(good, key=lambda v: -v[4])[:12]:
+    print(f"    {v[0]} {v[1]} {v[3]:.2f} {v[4]:.2f} {v[5]:.1f} {v[6]:.0f} {v[7]:.0f} {v[8]:.0f}", file=sys.stderr)
+PY
+  cat "$RUN/screen_summary.txt"
+  mapfile -t ALL < "$RUN/screen_keep.txt"
+  echo "    screening took $((SECONDS - t0)) s; ${#ALL[@]} nodes kept"
+  [ "${#ALL[@]}" -gt 0 ] || { echo "no node passed the screening"; exit 3; }
+fi
 NN=1; while (( NN * 2 <= ${#ALL[@]} )); do NN=$((NN * 2)); done
 if [ -n "${USE_NODES:-}" ]; then
+  # WAVE1=0 keeps two nodes for the baselines. USE_NODES_MIN: rather than give up, run on fewer
+  # nodes than USE_NODES, down to that many, when too few nodes passed the check and screening.
+  avail=$(( ${#ALL[@]} - (WAVE1 == 0 ? 2 : 0) ))
+  if (( USE_NODES > avail && ${USE_NODES_MIN:-0} > 0 && avail >= ${USE_NODES_MIN:-0} )); then
+    echo "!! $avail usable nodes for USE_NODES=$USE_NODES: running on $avail (USE_NODES_MIN=${USE_NODES_MIN})"
+    USE_NODES=$avail
+  fi
   (( USE_NODES >= 2 && USE_NODES <= ${#ALL[@]} )) || { echo "USE_NODES=$USE_NODES but ${#ALL[@]} usable nodes"; exit 3; }
   NN=$USE_NODES
 fi
+SPARE=("${ALL[@]:NN}")
 ALL=("${ALL[@]:0:NN}")
 echo "$NN nodes used, $((NA - NN)) spare or dropped: ${ALL[0]} .. ${ALL[NN - 1]}"
+if [ "$WAVE1" = 0 ] && (( ${#SPARE[@]} < 2 )); then
+  echo "!! WAVE1=0 runs the baselines on two spare nodes, and only ${#SPARE[@]} usable node(s) are spare: no baselines"
+fi
 
 # Memory on the node this script runs on, the first of the allocation, while the points
 # run: device memory per GCD and host memory.
@@ -124,11 +220,13 @@ point() {
   fi
   echo "=== $tag: $n GCDs on $k node(s), $(awk "BEGIN{printf \"%.0f\", $NX * $NY * $n / 1e9}") B cells, $mode strips  $(date +%T) ==="
   env SWE_HALO_OVERLAP=1 SWE_HALO_CUDA_AWARE=0 SWE_FROMDENSE_SIGMA_DUMMY=1 \
-      SWE_FROMDENSE_BUILD_STAGGER="${BUILD_STAGGER:-2}" \
+      SWE_FROMDENSE_BUILD_STAGGER="${BUILD_STAGGER:-$((LEAN ? 1 : 2))}" \
+      GEOSWE_RECT_FASTBUILD="$LEAN" GEOSWE_FROMDENSE_HOST_INDEX="$LEAN" BENCH_POOL_PEAK="${POOL_PEAK:-1}" \
+      BENCH_SENSORS="${SENSORS:-1}" \
     srun "${layout[@]}" -t "$STEP_MINUTES" "$PY" "$ROOT/benchmark/scaling_640m/scaling_bench_flat.py" --mode weak --direct \
          --nx "$NX" --ny-per-rank "$NY" --repeats "$REPEATS" --t-warm 40 --t-time "$T_TIME" $weights \
          --out "$RUN/flat_weak_$tag.csv" > "$RUN/point_$tag.log" 2>&1; st=$?
-  grep -E "scaling_640m-flat\] mode=weak N= *[0-9]+ rep=|GPU used after pack|N_active|capped" "$RUN/point_$tag.log" | cut -c1-160
+  grep -E "scaling_640m-flat\] mode=weak N= *[0-9]+ rep=|GPU used after pack|N_active|capped|memory: pool|sensors" "$RUN/point_$tag.log" | cut -c1-220
   if [ "$st" -ne 0 ] || ! grep -q "REPEATS=" "$RUN/point_$tag.log"; then
     echo "!! $tag FAILED (srun exit $st) after $((SECONDS - t0)) s"
     grep -E "rror|Killed|CANCELLED|OutOfMemory" "$RUN/point_$tag.log" | sort | uniq -c | sort -rn | head -5 | cut -c1-200
@@ -155,8 +253,21 @@ series() {
 slice() { local IFS=,; echo "${ALL[*]:$1:$2}"; }            # comma-separated nodes [start, start+count)
 
 # ---------------------------------------------------------------------------------------
+failed=0
+if [ "$WAVE1" = 0 ]; then
+echo; echo "=== the full point alone, the baselines on spare nodes beside it, $(date +%T) ==="
+pids=()
+if (( ${#SPARE[@]} >= 2 )); then
+  ( rc=0; for mode in $MODES; do point "001gcd" "${SPARE[0]}" 1 || rc=1; done; exit $rc ) \
+    > "$RUN/wave1_gcd.log" 2>&1 & pids+=($!)
+  series "001nodes" "${SPARE[1]}" "$GCDS" > "$RUN/wave1_1.log" 2>&1 & pids+=($!)
+fi
+series "$(printf '%03dnodes' "$NN")" "$(slice 0 $NN)" "$GCDS" retry || failed=$((failed + 1))
+for pid in "${pids[@]}"; do wait "$pid" || failed=$((failed + 1)); done
+cat "$RUN"/wave1_*.log 2>/dev/null
+else
 echo; echo "=== wave 1: the smaller points side by side, $(date +%T) ==="
-start=0; pids=(); failed=0
+start=0; pids=()
 K1=1; while (( K1 * 2 <= NN / 2 )); do K1=$((K1 * 2)); done   # largest power of two up to half the run
 for (( k = K1; k >= 1; k /= 2 )); do
   series "$(printf '%03dnodes' "$k")" "$(slice $start $k)" "$GCDS" > "$RUN/wave1_$k.log" 2>&1 & pids+=($!)
@@ -170,6 +281,7 @@ cat "$RUN"/wave1_*.log
 
 echo; echo "=== wave 2: every node, $(date +%T) ==="
 series "$(printf '%03dnodes' "$NN")" "$(slice 0 $NN)" "$GCDS" retry || failed=$((failed + 1))
+fi
 
 # ---------------------------------------------------------------------------------------
 kill "$mon_gpu" "$mon_host" 2>/dev/null

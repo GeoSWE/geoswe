@@ -48,10 +48,61 @@ savings grow ~10× while neighbor table grows the same ~10×, so net ratio
 holds. (For higher savings, switch neighbors to int24 or compact bit-packing.)
 """
 from __future__ import annotations
+import os
 import numpy as np
 from .backend import xp, USING_CUPY
 
 BOUNDARY_ID = -1   # sentinel for "not an active cell"
+
+
+def rect_fastbuild_enabled():
+    """``GEOSWE_RECT_FASTBUILD=1`` (opt-in): when the active set is one full rectangle,
+    ``CompressedSWE`` builds the mesh in closed form. Same arrays as the general build, in
+    seconds instead of minutes per billion cells, and without the (N, 4) int32 neighbour
+    table (16 B/cell of host and device memory at its peak)."""
+    return os.environ.get("GEOSWE_RECT_FASTBUILD", "0") == "1"
+
+
+def host_index_enabled():
+    """``GEOSWE_FROMDENSE_HOST_INDEX=1`` (opt-in): ``ij_active`` and ``active_id_padded`` stay
+    in host memory, as they do when a run loads from a cache (``run_cached``). The step never
+    reads them; output and the forcing set-up index them on the host. 12 B/cell less device
+    memory, which is what lets a GCD hold 1.6 billion cells."""
+    return os.environ.get("GEOSWE_FROMDENSE_HOST_INDEX", "0") == "1"
+
+
+def full_rectangle(mask, ring):
+    """``(a, b, c, d)`` when ``mask`` is True exactly on ``[a, b) x [c, d)``, ``ring`` is at
+    least 2 (the stencil reach the closed form assumes) and the rectangle dilated ``ring``
+    times stays inside the array, so that the dilation is not clipped; else None."""
+    if ring < 2:
+        return None
+    mask = np.asarray(mask)
+    rows = np.flatnonzero(mask.any(axis=1))
+    if rows.size == 0:
+        return None
+    a, b = int(rows[0]), int(rows[-1]) + 1
+    cols = np.flatnonzero(mask[a:b].any(axis=0))
+    c, d = int(cols[0]), int(cols[-1]) + 1
+    if int(np.count_nonzero(mask)) != (b - a) * (d - c):
+        return None
+    if a < ring or c < ring or b + ring > mask.shape[0] or d + ring > mask.shape[1]:
+        return None
+    return a, b, c, d
+
+
+def rect_rows(a, b, c, d, ring):
+    """Row layout of the rectangle ``[a, b) x [c, d)`` dilated ``ring`` times with the
+    4-neighbour cross (``scipy.ndimage.binary_dilation``'s default structure): every cell
+    within Manhattan distance ``ring``. Each stored row is one run of columns. Returns the
+    rows, their first column, width and flat offset (row-major, j fastest), all int64."""
+    rows = np.arange(a - ring, b + ring, dtype=np.int64)
+    half = ring - np.maximum(np.maximum(a - rows, rows - (b - 1)), 0)
+    jlo = c - half
+    w = (d - c) + 2 * half
+    off = np.zeros(rows.size, np.int64)
+    np.cumsum(w[:-1], out=off[1:])
+    return rows, jlo, w, off
 
 
 class CompressedMesh2D:
@@ -161,6 +212,8 @@ class CompressedMesh2D:
                 f"this mesh was built on. Pass the padded field (the shape of the dense "
                 f"solver's q[0] or b); an interior-shaped one would be gathered from the "
                 f"wrong cells, silently.")
+        if getattr(self, "_rect", None) is not None:
+            return self._pack_rect(arr_2d)
         i = self.ij_active[:, 0]
         j = self.ij_active[:, 1]
         if arr_2d.ndim == 2:
@@ -186,6 +239,8 @@ class CompressedMesh2D:
                 f"CompressedMesh2D.unpack: `out` has last two axes {tuple(out.shape[-2:])}, "
                 f"not the ({self.nxp}, {self.nyp}) padded grid of this mesh.")
         nxp, nyp = self.nxp, self.nyp
+        if getattr(self, "_rect", None) is not None:
+            return self._unpack_rect(arr_flat, fill, out)
         i = self.ij_active[:, 0]
         j = self.ij_active[:, 1]
         if arr_flat.ndim == 1:
@@ -201,13 +256,161 @@ class CompressedMesh2D:
         return out
 
     # ------------------------------------------------------------------
+    # Closed form for a fully covered rectangle (GEOSWE_RECT_FASTBUILD)
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_rectangle(cls, mesh, rect, ring, host_index=False):
+        """The mesh that ``CompressedMesh2D(mesh, stored)`` builds when ``stored`` is the
+        rectangle ``rect = (a, b, c, d)`` of ``mesh``'s interior dilated ``ring`` times (see
+        ``rect_rows``), in closed form: the same flat order, ``ij_active``,
+        ``active_id_padded`` and padded mask. The (N, 4) int32 ``neighbors`` table is not
+        built (it is None); ``rect_nbr_int16`` writes the int16 deltas directly. With
+        ``host_index`` the index arrays stay in host memory (see ``host_index_enabled``)."""
+        self = cls.__new__(cls)
+        self.mesh = mesh
+        nx, ny, ngh = mesh.nx, mesh.ny, mesh.ngh
+        nxp, nyp = nx + 2*ngh, ny + 2*ngh
+        self.nx, self.ny, self.ngh = nx, ny, ngh
+        self.nxp, self.nyp = nxp, nyp
+        self.dx, self.dy = mesh.dx, mesh.dy
+        a, b, c, d = (int(v) + ngh for v in rect)
+        rows, jlo, w, off = rect_rows(a, b, c, d, ring)
+        if rows[0] < 0 or rows[-1] >= nxp or int(jlo.min()) < 0 or int((jlo + w).max()) > nyp:
+            raise ValueError("CompressedMesh2D.from_rectangle: the dilated rectangle leaves the padded grid")
+        N = int(w.sum())
+        if N >= 2**31:
+            raise ValueError(f"CompressedMesh2D.from_rectangle: {N} stored cells do not fit the int32 flat ids")
+        self.N_active = N
+        self._rect = (rows, jlo, w, off, a, b, c, d, ring)
+        mask = np.zeros((nxp, nyp), dtype=bool)
+        aid = np.full((nxp, nyp), BOUNDARY_ID, dtype=np.int32)
+        ij = np.empty((N, 2), dtype=np.int32)
+        k0 = ring                                   # rows a .. b-1: the full-width core
+        W0, j0 = int(w[k0]), int(jlo[k0])
+        cols = np.arange(W0, dtype=np.int32)
+        RB = max(1, (1 << 24) // W0)                # ~16M cells a block: small int32 temporaries
+        for r0 in range(a, b, RB):
+            r1 = min(b, r0 + RB); n = r1 - r0
+            base = int(off[k0]) + (r0 - a) * W0
+            mask[r0:r1, j0:j0 + W0] = True
+            aid[r0:r1, j0:j0 + W0] = np.arange(n, dtype=np.int32)[:, None] * np.int32(W0) + cols[None, :] + np.int32(base)
+            v = ij[base:base + n * W0].reshape(n, W0, 2)
+            v[:, :, 0] = np.arange(r0, r1, dtype=np.int32)[:, None]
+            v[:, :, 1] = (j0 + cols)[None, :]
+        for k in self._rect_edge_rows():
+            i, jl, wk, o = int(rows[k]), int(jlo[k]), int(w[k]), int(off[k])
+            mask[i, jl:jl + wk] = True
+            aid[i, jl:jl + wk] = np.arange(o, o + wk, dtype=np.int32)
+            ij[o:o + wk, 0] = i
+            ij[o:o + wk, 1] = np.arange(jl, jl + wk, dtype=np.int32)
+        self._ij_host = ij
+        self._active_id_host = aid
+        self._mask_padded_host = mask
+        if USING_CUPY and not host_index:
+            self.active_id_padded = xp.asarray(aid)
+            self.ij_active = xp.asarray(ij)
+        else:
+            self.active_id_padded = aid
+            self.ij_active = ij
+        self.neighbors = None
+        return self
+
+    def _rect_edge_rows(self):
+        """Indices (into the stored rows) of the rows outside the full-width core."""
+        rows, ring = self._rect[0], self._rect[8]
+        core_end = ring + (self._rect[5] - self._rect[4])
+        return list(range(0, ring)) + list(range(core_end, rows.size))
+
+    def rect_is_active(self):
+        """``is_active`` (uint8, 1 on the rectangle's own cells) for the closed-form mesh."""
+        rows, jlo, w, off, a, b, c, d, ring = self._rect
+        out = xp.zeros(self.N_active, dtype=xp.uint8)
+        W0, o0 = int(w[ring]), int(off[ring])
+        out[o0:o0 + (b - a) * W0].reshape(b - a, W0)[:, ring:ring + (d - c)] = 1
+        return out
+
+    def rect_nbr_int16(self):
+        """The int16 neighbour deltas (E, W, N, S; id = k + delta, -32768 = none) of the
+        closed-form mesh, written directly: what ``nbr_to_int16_delta`` makes of the int32
+        table. Within a row the N/S deltas are +1/-1; across rows the E/W delta is constant
+        per row, ``w(i) + jlo(i) - jlo(i+1)`` and ``-w(i-1) + jlo(i) - jlo(i-1)``, where the
+        neighbouring row stores that column."""
+        rows, jlo, w, off, a, b, c, d, ring = self._rect
+        R, NONE = rows.size, -32768
+        # the E delta of row k is minus the W delta of row k + 1; within a row it is 1
+        big = max([1] + [abs(int(w[k]) + int(jlo[k]) - int(jlo[k + 1])) for k in range(R - 1)])
+        if big >= 32768:
+            raise ValueError(
+                f"neighbour delta out of int16 range (up to {big}): a stored row spans more than "
+                f"32768 cells. Split the domain along the contiguous y axis so each rank's padded "
+                f"rows stay under 32768 cells, or coarsen the grid.")
+        out = xp.empty((self.N_active, 4), dtype=xp.int16)
+        kb0, kb1 = ring + 1, ring + (b - a) - 1      # core rows whose neighbours are core rows too
+        W0 = int(w[ring])
+        if kb1 > kb0:
+            n, o = kb1 - kb0, int(off[kb0])
+            v = out[o:o + n * W0].reshape(n, W0, 4)
+            v[:, :, 0] = W0
+            v[:, :, 1] = -W0
+            v[:, :, 2] = 1
+            v[:, -1, 2] = NONE
+            v[:, :, 3] = -1
+            v[:, 0, 3] = NONE
+        for k in range(R):
+            if kb0 <= k < kb1:
+                continue
+            o, wk, jl = int(off[k]), int(w[k]), int(jlo[k])
+            j = np.arange(jl, jl + wk)
+            seg = np.empty((wk, 4), np.int16)
+            for col, kn in ((0, k + 1), (1, k - 1)):
+                if 0 <= kn < R:
+                    jl2, w2 = int(jlo[kn]), int(w[kn])
+                    delta = (wk if kn > k else -w2) + jl - jl2
+                    seg[:, col] = np.where((j >= jl2) & (j < jl2 + w2), delta, NONE)
+                else:
+                    seg[:, col] = NONE
+            seg[:, 2] = 1
+            seg[-1, 2] = NONE
+            seg[:, 3] = -1
+            seg[0, 3] = NONE
+            out[o:o + wk] = xp.asarray(seg)
+        return out
+
+    def _pack_rect(self, arr):
+        rows, jlo, w, off, a, b, c, d, ring = self._rect
+        mod = np if isinstance(arr, np.ndarray) else xp
+        head = tuple(arr.shape[:-2])
+        out = mod.empty(head + (self.N_active,), dtype=arr.dtype)
+        W0, j0, o0 = int(w[ring]), int(jlo[ring]), int(off[ring])
+        for h in (np.ndindex(*head) if head else [()]):
+            out[h + (slice(o0, o0 + (b - a) * W0),)].reshape(b - a, W0)[...] = arr[h + (slice(a, b), slice(j0, j0 + W0))]
+            for k in self._rect_edge_rows():
+                o, wk, jl = int(off[k]), int(w[k]), int(jlo[k])
+                out[h + (slice(o, o + wk),)] = arr[h + (int(rows[k]), slice(jl, jl + wk))]
+        return out
+
+    def _unpack_rect(self, arr_flat, fill, out):
+        rows, jlo, w, off, a, b, c, d, ring = self._rect
+        mod = np if isinstance(arr_flat, np.ndarray) else xp
+        head = tuple(arr_flat.shape[:-1])
+        if out is None:
+            out = mod.full(head + (self.nxp, self.nyp), mod.asarray(fill, dtype=arr_flat.dtype))
+        W0, j0, o0 = int(w[ring]), int(jlo[ring]), int(off[ring])
+        for h in (np.ndindex(*head) if head else [()]):
+            out[h + (slice(a, b), slice(j0, j0 + W0))] = arr_flat[h + (slice(o0, o0 + (b - a) * W0),)].reshape(b - a, W0)
+            for k in self._rect_edge_rows():
+                o, wk, jl = int(off[k]), int(w[k]), int(jlo[k])
+                out[h + (int(rows[k]), slice(jl, jl + wk))] = arr_flat[h + (slice(o, o + wk),)]
+        return out
+
+    # ------------------------------------------------------------------
     # Sanity helpers
     # ------------------------------------------------------------------
     @property
     def memory_summary(self):
         """Approximate memory cost of the compressed-mesh tables in MB."""
         bytes_id   = int(self.active_id_padded.size) * 4
-        bytes_nb   = int(self.neighbors.size) * 4
+        bytes_nb   = int(self.neighbors.size) * 4 if self.neighbors is not None else 0
         bytes_ij   = int(self.ij_active.size) * 4
         return {
             "active_id_padded": bytes_id / 1e6,

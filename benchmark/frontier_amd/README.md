@@ -344,3 +344,118 @@ run; the others rescale the per-rank kernel times of the same run to other strip
   that leaves 0.1 ms of step-to-step jitter, 0.1 ms for the global `dt` to travel, and,
   in the first 45 s of stepping only, one copy of 4 ms per rank in the halo send
   (0.24 to 0.29 ms per step at this size; none with the GPU-aware halo).
+
+## Weak scaling at 1.64 billion cells per GCD: past 100 trillion cells
+
+The billion-cell runs went to 10.24 trillion cells on 1,280 nodes (job `5687308`,
+2026-10-15: 164.93 ms/step on 10,240 GCDs, 95.1 % of one GCD, 96.0 % of one node).
+Frontier has about 9,200 usable nodes, 73,000 GCDs, so 100 trillion cells need more than
+1.37 billion cells per GCD even on all of them. At the start of stepping the flat
+benchmark held 51 bytes per cell of device memory, which caps a 64 GiB GCD at about 1.3
+billion cells. These changes bring the peak to 39 bytes per cell, with the step untouched:
+
+| Device memory per cell | Before | Now |
+|---|---|---|
+| state `q0..q2` and bed | 16 | 16 |
+| the fused step's second state buffer | 12 | 12 |
+| int16 neighbour table | 8 | 8 |
+| `ij_active` (only output reads it) | 8 | 0, on the host (`GEOSWE_FROMDENSE_HOST_INDEX=1`) |
+| friction class, `is_active`, the benchmark's dense friction array | 3 | 2 |
+| interior mask of the masked h_max | 1 | 1 |
+| transients at the start of the run: `active_id_padded` still alive (4), the interior mask's temporaries (2), the halo band's per-cell flags (about 6, several ranks only) | 6 to 7 at the peak | under 1 |
+| **peak**, one rank / several | **51 / 54** | **39.0 / 39.0** |
+
+- `GEOSWE_RECT_FASTBUILD=1` builds a rank's mesh in closed form when its active set is
+  one full rectangle, as every strip of this benchmark is: the same arrays as the
+  general build (`tests/test_gpu_rect_fastbuild.py`), in 10 to 12 s instead of about 2
+  minutes per billion cells, and without the (N, 4) int32 neighbour table.
+- The run's results do not change: `partition_check.py` gives the digest it gave before
+  the changes (`9f4a0334e17f`) on 1 to 8 ranks, with the overlap on and off, the
+  GPU-aware halo, the blocking dt reduction, and either switch (job `5755693`).
+- `run_weak_1b.sbatch`: `LEAN=1` (default) sets both switches and builds every rank at
+  once; `WAVE1=0` runs the full point alone, with the one-GCD and one-node baselines on
+  two spare nodes beside it; allocations of `SBCAST_FROM` (256) nodes or more get the
+  tarball by `sbcast`; a `kernel_cache/` in the tarball becomes the node-local CuPy cache.
+
+**How many cells a GCD holds** (job `5755664`, one node, eight single-GCD runs side by
+side, before the band and interior-mask changes, which took 1.3 B/cell more off):
+
+| Cells per GCD | Strip | Build | ms/step | ms per billion cells | Pool peak |
+|---|---|---|---|---|---|
+| 1.000 B | 31250 x 32000 | 7.5 s | 157.92 | 157.9 | 38.2 GiB |
+| 1.300 B | 40625 x 32000 | 8.3 s | 203.73 | 156.7 | 49.7 GiB |
+| 1.500 B | 46875 x 32000 | 9.9 s | 234.17 | 156.1 | 57.3 GiB |
+| 1.638 B | 51200 x 32000 | 10.4 s | 256.49 | 156.6 | 62.6 GiB |
+| 1.700 B | 53125 x 32000 | 11.6 s | out of memory | | |
+
+**One GCD to 128 nodes** (job `5755741`, 2026-10-24, 130 nodes, 128 used, `NX=51200
+T_TIME=600 REPEATS=3`; the last of three windows of 440 steps, about 115 s each):
+
+| GCDs | Nodes | Cells | ms/step | vs 1 GCD | vs 1 node |
+|---|---|---|---|---|---|
+| 1 | | 1.64 B | 258.18 | | |
+| 8 | 1 | 13.1 B | 260.00 | 99.3 % | |
+| 16 | 2 | 26.2 B | 259.77 | 99.4 % | 100.1 % |
+| 32 | 4 | 52.4 B | 260.45 | 99.1 % | 99.8 % |
+| 64 | 8 | 105 B | 261.36 | 98.8 % | 99.5 % |
+| 128 | 16 | 210 B | 260.91 | 99.0 % | 99.7 % |
+| 256 | 32 | 419 B | 264.09 | 97.8 % | 98.5 % |
+| 512 | 64 | 839 B | 267.27 | 96.6 % | 97.3 % |
+| 1024 | 128 | 1.68 trillion | 267.73 | 96.4 % | 97.1 % |
+
+- Pool peak 59.6 GiB on every GCD (39.0 B/cell at this size), 4.4 GiB below the 64;
+  `rocm-smi` showed 60.1 GiB at most. Host: 270 GiB at most on a node of 512.
+- The build took 11 s per rank, all ranks at once; the tarball reached 130 nodes by
+  `sbcast` in 20 s. The job took 16 minutes 41 seconds, 36 node-hours.
+
+**To 1,280 nodes, and a card that slows down** (job `5756033`, 2026-10-24, 1,306 nodes,
+1,280 used; the smaller points side by side, then all nodes):
+
+| GCDs | Nodes | Cells | ms/step | vs 1 GCD | Windows, ms/step |
+|---|---|---|---|---|---|
+| 1 | | 1.64 B | 259.32 | | 259.15, 259.22, 259.32 |
+| 8 | 1 | 13.1 B | 259.55 | 99.9 % | |
+| 64 | 8 | 105 B | 262.05 | 99.0 % | |
+| 1024 | 128 | 1.68 trillion | 268.41 | 96.6 % | 267.07, 268.11, 268.41 |
+| 2048 | 256 | 3.36 trillion | 265.45 | 97.7 % | 264.43, 265.29, 265.45 |
+| 4096 | 512 | 6.71 trillion | 287.05 | 90.3 % | 266.67, 280.69, 287.05 |
+| 10240 | 1280 | 16.8 trillion | 291.14 | 89.1 % | 272.36, 286.33, 291.14 |
+
+- The 4,096-GCD point began at the pace of the others (97.2 % in its first window) and
+  lost 8 % within four minutes. The 10,240-GCD point, which ran next and included the same
+  512 nodes, began slow and slowed further. The 2,048-GCD point, on other nodes at the same
+  time, held steady. That is the signature of a card that slows down under sustained load
+  in those 512 nodes, not of the code or of the network: a lockstep run goes at the pace of
+  its slowest GCD. The job did not record which card.
+- Hence `SCREEN=1` for the largest runs (`screen_gcds.py`): every GCD of the allocation steps
+  its own copy of the problem for three minutes, and the nodes whose slowest GCD is more
+  than 2.5 % above the median of the last minute are left out before the run. Rehearsed on
+  4 nodes (job `5756225`: 32 GCDs within 0.8 %). `BENCH_SENSORS=1` (the default in the
+  launcher) reports the slowest-clocked and hottest cards of the last window with their
+  hosts; an MI250X exposes its sensors on one of its two GCDs.
+- The job took 19 minutes 34 seconds, about 425 node-hours; the tarball reached 1,306 nodes
+  by `sbcast` in 79 s.
+
+**100.7 trillion cells on 7,680 nodes** (job `5756255`, 2026-10-25, 7,840 nodes allocated;
+`SCREEN=1 WAVE1=0 USE_NODES=7680 NX=51200 T_TIME=600 REPEATS=3`):
+
+| GCDs | Nodes | Cells | ms/step, windows 1, 2, 3 | vs 1 GCD | vs 1 node |
+|---|---|---|---|---|---|
+| 1 | | 1.64 B | 256.50, 256.40, 256.36 | | |
+| 8 | 1 | 13.1 B | 259.76, 259.65, 259.77 | 98.7 % | |
+| 61440 | 7680 | **100.66 trillion** | 266.67, 272.51, **274.60** | 96.1 %, 94.1 %, **93.4 %** | 97.4 %, 95.3 %, **94.6 %** |
+
+- 441 steps in the last window, 3.67 x 10^14 cell updates per second (6.2 x 10^13 at 10.24
+  trillion cells). Every rank built its 1.64-billion-cell mesh in 10.9 s; pool peak 59.6 GiB
+  of 64 per GCD (39.1 B/cell), 254 GiB of host memory at most on a node.
+- The screening (three minutes of load on all 62,720 GCDs, at 82.5 ms/step) left out 57
+  nodes whose slowest GCD was 2.6 to 3.8 % above the median; none was far out (the slowest
+  GCD of all, +4.1 %). The baselines ran on two of the spare nodes during the full point.
+- The step slows by 3 % over the three windows. In the last one the cards' core clock was
+  1,596 MHz at the median (1,662 MHz on the baselines' nodes at the same time), the lowest
+  1,489 MHz, on cards at their 500 W power limit; the hottest junction read 100 C. Under the
+  whole machine's load the cards clock down, and the lockstep run goes at the pace of the
+  slowest. The first window, 96.1 % of one GCD, is the code at full clock.
+- The job took 23 minutes 1 second, about 3,000 node-hours: staging 88 s (`sbcast`), node
+  check, screening 296 s, the full point 924 s (about six minutes of it before the first
+  step: launching 61,440 ranks, MPI start-up, the host-side setup).

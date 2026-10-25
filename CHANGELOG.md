@@ -9,6 +9,14 @@ promise below.
 
 ### Added
 
+- Room for 1.6 billion cells on a 64 GiB GPU (an MI250X GCD), up from about 1.3 billion, so that
+  the weak-scaling benchmark can pass 100 trillion cells on Frontier. Two opt-in switches:
+  `GEOSWE_RECT_FASTBUILD=1` builds the compressed mesh of a rank whose active set is one full
+  rectangle in closed form (the same arrays as the general build, about 10 s per billion cells
+  instead of about 2 minutes, and no (N, 4) int32 neighbour table), and
+  `GEOSWE_FROMDENSE_HOST_INDEX=1` keeps `ij_active` and `active_id_padded` on the host after
+  `from_dense`, as `run_cached` already does (12 B/cell). Results are bit-identical with either
+  (`tests/test_gpu_rect_fastbuild.py`; partition digests unchanged on 1 to 8 ranks).
 - Strips sized by device speed. Under MPI a run cannot go faster than its slowest device, and
   devices of one model differ: 1024 MI250X GCDs span 3.8 % in speed, 0.42 % standard deviation.
   `geoswe.partition.strip_bounds` cuts a 1xN split by per-rank weights, and the run driver
@@ -19,6 +27,15 @@ promise below.
   speeds of a run.
   `benchmark/frontier_amd/rank_speed.py` measures the weights, and
   `scaling_bench_flat.py --rank-weights` uses them in the weak-scaling benchmark.
+
+### Changed
+
+- The start of `CompressedSolver.run` needs less device memory, with identical results: the
+  halo/compute overlap finds the cells that read ghost data on index sets instead of per-cell
+  flag arrays (about 6 B/cell of transient memory before), and the interior mask of the
+  masked h_max is built in place (2 B/cell). That start was the device-memory peak of a large
+  rank: 41 B/cell in the flat weak-scaling benchmark with the switches above, now 39 (1.6 billion
+  cells on one GCD, one rank or many).
 
 ## [1.1.1] - 2026-10-06
 

@@ -18,6 +18,7 @@ import os, json, time, threading
 import numpy as np
 import cupy as cp
 from .backend import elementwise_kernel, nvidia_compute_capability, raw_kernel
+from .compressed_mesh import host_index_enabled
 from .compressed_rhs import (build_flat_srm_hllc_kernel, build_flat_srm_hllc_gathered_kernel,
                              nbr_to_int16_delta, bedgrad_precomp_enabled,
                              build_flat_srm_hllc_kernel_pg, build_flat_bedgrad_kernel,
@@ -241,6 +242,10 @@ _CFL_LAMMAX_FLAT_BLK_NS_SRC = _CFL_LAMMAX_FLAT_BLK_SRC.replace(
     "cfl_lammax_flat_blk", "cfl_lammax_flat_blk_ns").replace(
     "float l = (sqrtf(u*u + v*v) + c) * inv_sig[k];",
     "float l = (sqrtf(u*u + v*v) + c);")
+
+# The interior mask the masked h_max reads, built in place from the stored flags (see run()).
+_and_active_inplace = elementwise_kernel(            # m &= (a > 0), in place (see run())
+    "uint8 a", "bool m", "m = m && (a > 0)", "geoswe_and_active_inplace")
 
 # Masked interior h_max for progress/frame diagnostics: 4-byte atomicMax reduction
 # (float_as_uint is order-preserving for h >= 0). Replaces q0[_interior_act].max(),
@@ -1759,8 +1764,11 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
     # physical h_max matching the saved interior frames. The halo rows are is_active=1 but
     # carry a transient post-axpy value before the next exchange overwrites them, so an
     # all-active max can briefly spike (the interior never sees those values).
-    _interior_act = (act > 0) & cp.asarray((_ijh[:, 0] >= ngh) & (_ijh[:, 0] < ngh + nxl) &
-                                           (_ijh[:, 1] >= ngh) & (_ijh[:, 1] < ngh + nyl))  # de-halo BOTH axes
+    # Built in place: the expression form's (act > 0) and upload temporaries were 2 B/cell more
+    # at the start of the run, which is the device-memory peak of a billion-cell rank.
+    _interior_act = cp.asarray((_ijh[:, 0] >= ngh) & (_ijh[:, 0] < ngh + nxl) &
+                               (_ijh[:, 1] >= ngh) & (_ijh[:, 1] < ngh + nyl))  # de-halo BOTH axes
+    _and_active_inplace(act, _interior_act)            # &= (act > 0)
     _hmax_kern = raw_kernel(_HMAX_MASKED_SRC, "hmax_masked")
     _hmax_bits = cp.zeros(1, cp.uint32)
     _interior_u8 = _interior_act.view(cp.uint8)          # bool is 1 byte; free reinterpret
@@ -1960,24 +1968,26 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
         # neighbor graph: this captures EVERY +/-2 reader exactly. Active-only so the gathered
         # kernel's "always active" assumption holds (no is_active guard there). Single-rank
         # interior+gathered RHS is then bit-identical to the full pass, and overlap == blocking.
-        _ghost = cp.zeros(st.N, cp.uint8)
-        for f in halo.faces:
-            _ghost[f["rfi"]] = 1
-        _reach = _ghost.copy()
+        # On index sets, not per-cell flags: the band is a few rows per face, and the per-cell
+        # ghost/reach/region arrays and their comparisons were ~6 B/cell of transient device
+        # memory at the start of the run (enough to stop a 1.6-billion-cell rank). Same set:
+        # the ghost cells, dilated twice over the neighbour graph, active ones, ascending.
+        _S = (cp.unique(cp.concatenate([cp.asarray(f["rfi"]).astype(cp.int64).ravel() for f in halo.faces]))
+              if halo.faces else cp.zeros(0, cp.int64))
         for _hop in range(2):                       # SRM-HLLC stencil reaches +/-2 cells
-            _cur = cp.where(_reach != 0)[0]
+            _parts = [_S]
             for _d in range(4):                     # E,W,N,S neighbor deltas (int16; -32768 = none)
-                _delta = st.nbr[_cur, _d].astype(cp.int64)
+                _delta = st.nbr[_S, _d].astype(cp.int64)
                 _v = _delta > -32768
-                _reach[_cur[_v] + _delta[_v]] = 1
-        _region = cp.where((_reach != 0) & (st.is_active != 0), cp.uint8(1), cp.uint8(0))
-        st.bidx = cp.where(_region != 0)[0].astype(cp.int32)
+                _parts.append(_S[_v] + _delta[_v])
+            _S = cp.unique(cp.concatenate(_parts))
+        st.bidx = _S[st.is_active[_S] != 0].astype(cp.int32)
         # Fold the band flag into bit 1 of is_active (band cells -> 3). The RHS pass
         # split tests that bit instead of reading a separate region array (one less
         # 1 B/cell stream per step), so st.region stays None and _region is freed.
         # Idempotent across run() calls: 3 is nonzero, so the band recomputes the same.
         st.is_active[st.bidx] = cp.uint8(3)
-        del _region, _ghost, _reach
+        del _S, _parts
         if rank == 0:
             say(f"  [compressed] halo-compute OVERLAP on (ghost-reader band per rank "
                 f"~{int(st.bidx.size)} active cells of {st.N})")
@@ -3038,6 +3048,12 @@ class CompressedSolver:
         inv_sig_f = _f32(cs.pack(inv_sig)) if inv_sig is not None \
             else cp.ones(1 if _sig_dummy else cs.N_stored, cp.float32)
         _pool.free_all_blocks()
+        if host_index_enabled() and not isinstance(cs.cm.ij_active, np.ndarray):
+            # GEOSWE_FROMDENSE_HOST_INDEX=1: keep the index arrays on the host, as run_cached
+            # does (12 B/cell of device memory; the step never reads them)
+            cs.cm.ij_active = cs.cm._ij_host
+            cs.cm.active_id_padded = cs.cm._active_id_host
+            _pool.free_all_blocks()
         ij_active = cs.cm.ij_active
         nbr = cs.nbr; is_active = cs.is_active   # `cs.cm.neighbors` was already freed above,
                                     # before packing, so it does not sit under the flat copies
@@ -3226,8 +3242,16 @@ class CompressedSolver:
             return
         cs = self.cs; ngh = self.ngh; ij_active = self.ij_active; is_active = self.is_active
         ring = self._ring_raw; sponge = self._sponge_raw; rain = self._rain_raw
+        aid = cs.cm.active_id_padded
+
+        def flat_of(i, j):
+            """active_id_padded[i, j] as device int32, indexed where the map lives (it stays on
+            the host with GEOSWE_FROMDENSE_HOST_INDEX=1)."""
+            if isinstance(aid, np.ndarray):
+                return cp.asarray(aid[cp.asnumpy(i), cp.asnumpy(j)].astype(np.int32))
+            return aid[i, j].astype(cp.int32)
         if ring and ring.get("n", 0) > 0:
-            self._ring_b = dict(rflat=cs.cm.active_id_padded[ring["i"], ring["j"]].astype(cp.int32),
+            self._ring_b = dict(rflat=flat_of(ring["i"], ring["j"]),
                                 rbed=ring["bed"], rwg=ring["wg"], NG=int(ring["NG"]), n=int(ring["n"]),
                                 t_common=ring["t_common"], stage_all=ring["stage_all"])
         if sponge is not None:
@@ -3235,7 +3259,8 @@ class CompressedSolver:
                                   amb_f=cs.pack(sponge["amb"]).astype(cp.float32))
             sponge["keep"] = None; sponge["amb"] = None
         if rain is not None:
-            ii = ij_active[:, 0] - ngh; jj = ij_active[:, 1] - ngh
+            ija = cp.asarray(ij_active)                     # a device copy while it is mapped
+            ii = ija[:, 0] - ngh; jj = ija[:, 1] - ngh; del ija
             nx, ny = self.nxp - 2*ngh, self.nyp - 2*ngh
             inb = (ii >= 0) & (ii < nx) & (jj >= 0) & (jj < ny) & (is_active > 0)
             lk2d = rain["lookup_dev"]
@@ -3257,14 +3282,14 @@ class CompressedSolver:
         cl = self._clamp_raw
         if cl is not None and len(cl["rows"]) > 0:
             ri = cp.asarray(cl["rows"]); rj = cp.asarray(cl["cols"])
-            self._clamp_b = dict(idx=cs.cm.active_id_padded[ri, rj].astype(cp.int32),
+            self._clamp_b = dict(idx=flat_of(ri, rj),
                                  hmax=cp.asarray(cl["hmax"], cp.float32))
         # cross-section pixels: map local-padded (i,j) -> flat; drop pixels not stored on this rank
         csr = self._cs_raw
         if csr is not None:
             if len(csr["pix_i_loc"]) > 0:
                 pi = cp.asarray(csr["pix_i_loc"]); pj = cp.asarray(csr["pix_j_loc"])
-                flat_all = cs.cm.active_id_padded[pi, pj]
+                flat_all = flat_of(pi, pj)
                 keep = cp.asnumpy(flat_all >= 0)
                 flat_idx = flat_all[cp.asarray(keep)].astype(cp.int32)
                 gidx = np.asarray(csr["global_idx"])[keep].astype(np.int64)

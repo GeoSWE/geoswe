@@ -14,6 +14,35 @@ from mpi4py import MPI
 comm = MPI.COMM_WORLD; rank, N = comm.rank, comm.size
 import cupy as cp
 cp.cuda.Device(rank % cp.cuda.runtime.getDeviceCount()).use()
+# BENCH_POOL_PEAK=1: track the peak of CuPy's pool (what an allocation actually needs; rocm-smi
+# also counts blocks the pool has freed) and the host's peak RSS, and report both per run.
+_POOL = cp.get_default_memory_pool(); _PEAK = [0]
+if os.environ.get("BENCH_POOL_PEAK", "0") == "1":
+    def _alloc(size):
+        m = _POOL.malloc(size); u = _POOL.used_bytes()
+        if u > _PEAK[0]: _PEAK[0] = u
+        return m
+    cp.cuda.set_allocator(_alloc)
+# BENCH_SENSORS=1: every rank samples its GCD's junction temperature, power and core clock
+# every 5 s, and rank 0 reports the slowest-clocked and hottest GCDs of the last timed window
+# with their hosts, so a run held back by one card says which card.
+_SENS = []
+if os.environ.get("BENCH_SENSORS", "0") == "1":
+    import glob as _glob, socket as _socket, threading as _thr
+    _HOST = _socket.gethostname().split(".")[0]
+    _PCI = cp.cuda.Device().pci_bus_id.lower()
+    def _sense():
+        hw = _glob.glob(f"/sys/bus/pci/devices/{_PCI}/hwmon/hwmon*")
+        if not hw:
+            return
+        rd = lambda name: float(open(os.path.join(hw[0], name)).read())
+        while True:
+            try:
+                _SENS.append((time.time(), rd("temp2_input") / 1e3, rd("power1_average") / 1e6, rd("freq1_input") / 1e6))
+            except Exception:
+                pass
+            time.sleep(5)
+    _thr.Thread(target=_sense, daemon=True).start()
 sys.path.insert(0, os.path.expandvars("${GEOSWE_DATA_ROOT}"))
 from geoswe.mesh import Mesh2D
 from geoswe.solver import Solver2D, Config
@@ -80,13 +109,24 @@ if a.rank_weights:
 H0, AMP = 10.0, 0.5
 xi = np.arange(NX, dtype=np.float64)[:, None]
 yj = (j0 + np.arange(NY_loc, dtype=np.float64))[None, :]
-eta = H0 + AMP * np.sin(2*np.pi*xi/512.0) * np.sin(2*np.pi*yj/512.0)
+ngh = 4
+if a.direct:
+    # the padded f32 surface, filled in row blocks: the same f64 arithmetic per cell, cast
+    # once, as np.pad(eta.astype(f32)) of the whole block did, without its f64 copy (8 B/cell
+    # of host memory per rank, 13 GB at 1.6 billion cells)
+    eta_pad = np.zeros((NX + 2*ngh, NY_loc + 2*ngh), np.float32)
+    _RB = max(1, (1 << 24) // max(NY_loc, 1))
+    for _r0 in range(0, NX, _RB):
+        _r1 = min(NX, _r0 + _RB)
+        eta_pad[ngh + _r0:ngh + _r1, ngh:ngh + NY_loc] = \
+            (H0 + AMP * np.sin(2*np.pi*xi[_r0:_r1]/512.0) * np.sin(2*np.pi*yj/512.0)).astype(np.float32)
+else:
+    eta = H0 + AMP * np.sin(2*np.pi*xi/512.0) * np.sin(2*np.pi*yj/512.0)
 if not a.direct:   # direct mode builds its padded f32 fields from `eta` alone (host-lean:
                    # the (3,nx,ny) f64 q0_loc is 24 B/cell of host RAM that 16 ranks can't afford)
     bed_loc = np.zeros((NX, NY_loc), np.float64)
     q0_loc = np.zeros((3, NX, NY_loc), np.float64); q0_loc[0] = eta
 
-ngh = 4
 h_min = 1e-6 if a.dtype == "float32" else 1e-10
 m_cls = cp.asarray(np.zeros((NX+2*ngh, NY_loc+2*ngh), np.uint8))
 m_tab = cp.asarray(np.array([0.03], dtype=a.dtype))
@@ -115,10 +155,10 @@ if a.direct:
         @b.setter
         def b(self, v): pass          # from_dense does `s.b = None` afterwards
     s = _FakeDense()
-    # same values as the Solver2D path: eta computed in f64, cast to f32, zero ghosts;
-    # momentum/bed are calloc'd zeros (virtual pages -- near-zero host RSS).
-    eta_pad = np.pad(eta.astype(np.float32), ngh); del eta
+    # same values as the Solver2D path: eta computed in f64, cast to f32, zero ghosts (built
+    # above); momentum/bed are calloc'd zeros (virtual pages -- near-zero host RSS).
     s.q = _PopQ([eta_pad, np.zeros((nxp, nyp), np.float32), np.zeros((nxp, nyp), np.float32)])
+    del eta_pad
     s.sigma = None
     s.inside_mask = np.pad(np.ones((NX, NY_loc), bool), ngh)   # numpy is fine: from_dense asnumpy()s it
     s._rhs_buf = None; s._max_h = None
@@ -139,6 +179,8 @@ csol = CompressedSolver.from_dense(
     nx_glob=NX, ny_glob=NY_glob,
     comm=(None if N == 1 else comm), dims=[1, N],
     i0_glob=0, j0_glob=j0, Nx_loc=NX, Ny_loc=NY_loc, say=quiet)
+del m_cls                         # packed into the solver; the dense copy is 1 B/cell of device memory
+cp.get_default_memory_pool().free_all_blocks()
 
 OUTDIR = os.path.join(os.environ.get("SCRATCH_BENCH", "/tmp"), "flatbench_shared")
 os.makedirs(os.path.join(OUTDIR, "frames_parallel"), exist_ok=True)   # every rank writes frame files here
@@ -160,14 +202,45 @@ if a.repeats > 0:
         return (int(m.group(1)), float(m.group(2))) if m else (-1, 0.0)
 
     one(a.t_warm)                                        # untimed warmup (JIT + halo plans)
-    ms_all, st_r = [], -1
+    ms_all, st_r, win_t = [], -1, []
     for r in range(a.repeats):
+        _tw0 = time.time()
         st_r, w_r = one(a.t_time)
+        win_t.append((_tw0, time.time()))
         ms_all.append(w_r / max(st_r, 1) * 1000.0)
         if rank == 0:
             print(f"[scaling_640m-flat] mode={a.mode} N={N:2d} rep={r} ms/step={ms_all[-1]:8.3f} "
                   f"steps={st_r} total={NX*NY_glob/1e9:6.3f}B per-rank={CELLS_RANK/1e6:6.1f}M", flush=True)
     gmib = comm.reduce(cp.get_default_memory_pool().used_bytes()/1048576.0, op=MPI.MAX, root=0)
+    if os.environ.get("BENCH_SENSORS", "0") == "1":
+        _t0w, _t1w = win_t[-1]
+        _sel = [x for x in _SENS if _t0w <= x[0] <= _t1w]
+        _mine = ((sum(x[3] for x in _sel) / len(_sel), min(x[3] for x in _sel), max(x[1] for x in _sel),
+                  sum(x[2] for x in _sel) / len(_sel)) if _sel else (float("nan"),) * 4)
+        _all = comm.gather((_HOST, os.environ.get("ROCR_VISIBLE_DEVICES", "?"), rank) + _mine, root=0)
+        if rank == 0:
+            _ok = [x for x in _all if x[3] == x[3]]
+            if _ok:
+                _sc = sorted(_ok, key=lambda x: x[3]); _hot = sorted(_ok, key=lambda x: -x[5])
+                _med = sorted(x[3] for x in _ok)[len(_ok) // 2]
+                print(f"[scaling_640m-flat] sensors, last window, {len(_ok)} of {N} ranks: core clock median "
+                      f"{_med:.0f} MHz, lowest {_sc[0][3]:.0f}; hottest junction {_hot[0][5]:.0f} C", flush=True)
+                for x in _sc[:5]:
+                    print(f"[scaling_640m-flat] sensors   low clock: {x[0]} gcd {x[1]} rank {x[2]}: mean {x[3]:.0f} MHz, "
+                          f"min {x[4]:.0f}, junction max {x[5]:.0f} C, power {x[6]:.0f} W", flush=True)
+                for x in _hot[:3]:
+                    print(f"[scaling_640m-flat] sensors   hot: {x[0]} gcd {x[1]} rank {x[2]}: junction max {x[5]:.0f} C, "
+                          f"clock {x[3]:.0f} MHz, power {x[6]:.0f} W", flush=True)
+    if os.environ.get("BENCH_POOL_PEAK", "0") == "1":
+        import resource as _res
+        _pk = comm.reduce(_PEAK[0] / 2**30, op=MPI.MAX, root=0)
+        _hk = comm.reduce(_res.getrusage(_res.RUSAGE_SELF).ru_maxrss / 2**20, op=MPI.MAX, root=0)
+        _fb, _tb = cp.cuda.runtime.memGetInfo()
+        _uk = comm.reduce((_tb - _fb) / 2**30, op=MPI.MAX, root=0)
+        if rank == 0:
+            print(f"[scaling_640m-flat] memory: pool peak {_pk:.2f} GiB, device in use {_uk:.2f} GiB, "
+                  f"host peak RSS {_hk:.1f} GiB (max over ranks; {CELLS_RANK/1e9:.3f} B cells per rank, "
+                  f"{_pk * 2**30 / CELLS_RANK:.1f} B/cell)", flush=True)
     if rank == 0:
         import statistics as _stat
         mean = _stat.fmean(ms_all)

@@ -33,7 +33,8 @@ import numpy as np
 
 import cupy as cp
 from .backend import gpu_platform, raw_kernel
-from .compressed_mesh import CompressedMesh2D
+from .compressed_mesh import (CompressedMesh2D, full_rectangle, host_index_enabled,
+                              rect_fastbuild_enabled)
 from . import rhs_cuda as R
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,10 @@ class CompressedSWE:
     def __init__(self, mesh, inside_mask, ring=2):
         self.mesh = mesh
         self.inside = np.asarray(inside_mask).astype(bool)
+        rect = full_rectangle(self.inside, ring) if rect_fastbuild_enabled() else None
+        if rect is not None:
+            self._init_rectangle(mesh, rect, ring)
+            return
         try:   # SciPy ships with the gpu extras; keep the import off the module path
             from scipy.ndimage import binary_dilation
         except ImportError as exc:
@@ -262,6 +267,24 @@ class CompressedSWE:
         # verify every true-active cell has all +/-1,+/-2 neighbors stored (no OOB / no
         # ghost-fallback) -> guarantees bit-identical to dense at active cells.
         self._verify()
+
+    def _init_rectangle(self, mesh, rect, ring):
+        """Closed-form build when the active set is one full rectangle (GEOSWE_RECT_FASTBUILD=1).
+
+        The same stored set, flat order, ``is_active``, int16 neighbour deltas and counts as the
+        general build (``tests/test_gpu_rect_fastbuild.py`` compares them array by array),
+        without the dilation, the (N, 4) int32 table and the coverage check: with ``ring`` of
+        at least 2 every active cell of a rectangle has its +/-1 and +/-2 neighbours stored, by
+        construction."""
+        self.cm = CompressedMesh2D.from_rectangle(mesh, rect, ring, host_index=host_index_enabled())
+        ngh = mesh.ngh
+        self.stored = self.cm._mask_padded_host[ngh:ngh + mesh.nx, ngh:ngh + mesh.ny]
+        self.is_active = self.cm.rect_is_active()
+        self.nbr = self.cm.rect_nbr_int16()
+        self.N_stored = self.cm.N_active
+        a, b, c, d = rect
+        self.N_active = (b - a) * (d - c)
+        self.fully_covered = True
 
     def _screen_row_width(self):
         """Refuse a stored mask too wide for the int16 neighbour deltas, before the table.
