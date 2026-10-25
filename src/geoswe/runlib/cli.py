@@ -111,6 +111,14 @@ def build_parser(extra=None):
                     help="With --compressed (MPI): active-cell-balanced 1xN y-split (florida-style "
                          "cumulative-active boundaries) instead of equal grid blocks. Balances MPI load "
                          "(equal 2x2 -> 1.26 max/mean; active-balanced 1xN -> ~1.0).")
+    ap.add_argument("--rank-weights", default=None,
+                    help="With --compressed --balanced-partition (MPI): a text file with one positive "
+                         "number per rank, the relative speed of its device. Each rank then holds "
+                         "that share of the active cells instead of an equal one, so that unequal "
+                         "devices finish a step together; with equal shares a run goes at the pace "
+                         "of its slowest device. The result does not depend on the weights. "
+                         "benchmark/frontier_amd/rank_speed.py measures them; a resumed run needs "
+                         "the file it started with.")
     ap.add_argument("--h-min", type=float, default=None,
                     help="Wet/dry + CFL wet-threshold floor (m). Default None -> the validated "
                          "1e-6 (fp32) / 1e-10 (fp64), i.e. byte-identical to the calibrated runs. "

@@ -18,6 +18,7 @@ mesh
 forcing
 compressed
 runlib
+partition
 ```
 
 The three modules below prepare the inputs of a run and collect its output at

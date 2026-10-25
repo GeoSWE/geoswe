@@ -92,6 +92,36 @@ also needs `MPICH_GPU_SUPPORT_ENABLED=1` and an `mpi4py` linked against the GPU
 transport library; GeoSWE falls back to host staging, with a warning, when Cray
 MPICH is running without its GPU support. See [AMD GPUs](amd_gpus.md).
 
+(devices-of-unequal-speed)=
+### Devices of unequal speed
+
+Every step ends with the ranks waiting for each other, for the halo of their
+neighbours and for the global `dt`, so a run cannot go faster than its slowest
+device, and devices of one model are not equally fast. Over 1024 MI250X GCDs on
+Frontier the measured speeds have a standard deviation of 0.42 %, with the
+slowest 1.8 % below the mean; a coupled run on 16 GCDs took the time of its
+slowest member plus 0.6 %.
+
+{py:func}`geoswe.partition.strip_bounds` cuts a 1xN split so that each rank's
+share of the work is proportional to a weight, the measured speed of its device,
+and unequal devices then finish a step together. The solution does not depend on
+where the cuts are: a ghost cell is an exact copy of the neighbour's cell. Under
+the run driver, `--rank-weights FILE` applies it to
+`--compressed --balanced-partition`. The file holds one positive number per rank;
+`benchmark/frontier_amd/rank_speed.py` writes it from a 30 s measurement, which
+repeats to 0.05 % rms. Measure in the job that will use the weights, with the
+same binding, and resume a run with the file it started with.
+
+Expect a small gain from weights measured that way. At one billion cells per GCD,
+weighted strips were 0.5 % faster per step than equal ones on 1024 GCDs and 0.3 %
+on average from 8 to 1024, where equal strips would in principle wait 1.9 % for
+the slowest device. The speeds that small dense problem measures are not quite
+those of a run, and in a run the speeds of some devices change during the first
+two minutes. On 128 GCDs, three to four minutes into two runs, the slowest rank
+was 0.8 and 1.5 % above the mean rank with such weights; from the per-rank times
+of those runs, equal strips would have left 1.6 to 1.7 %, and weights taken from
+the run's own speeds 0.2 to 0.5 %. Measuring for longer changes little.
+
 ## Large domains
 
 For continental-scale problems that do not fit a dense grid, combine MPI with the

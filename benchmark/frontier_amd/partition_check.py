@@ -7,8 +7,9 @@ Runs the tests/mpi_bitcheck.py problem (a synthetic lake, 1024 x 2048 cells) on 
 gathers the cells each rank owns into the global field and prints one md5 of it. The
 digest must be the same for every rank count and every halo configuration
 (SWE_HALO_CUDA_AWARE, SWE_HALO_OVERLAP / SWE_DENSE_HALO_OVERLAP, SWE_CFL_ASYNC,
-SWE_FLAT_FUSE_STEP): a ghost cell is an exact copy of the neighbour's cell, so the
-arithmetic a cell sees does not depend on where the seams are or on how the halo travels. `Solver2D.cfl_robust_pct`
+SWE_FLAT_FUSE_STEP), and for strips of unequal height (--rank-weights): a ghost cell is an
+exact copy of the neighbour's cell, so the arithmetic a cell sees does not depend on where
+the seams are or on how the halo travels. `Solver2D.cfl_robust_pct`
 is outside this matrix: `cfl_dt` refuses it under MPI, because a per-rank percentile reduced
 with MAX is not the global percentile and the digest would then depend on the rank count by
 construction.
@@ -26,6 +27,7 @@ import cupy as cp
 cp.cuda.Device(rank % cp.cuda.runtime.getDeviceCount()).use()
 from geoswe.mesh import Mesh2D
 from geoswe.solver import Solver2D, Config
+from geoswe.partition import strip_bounds
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--tier", choices=["compressed", "dense"], default="compressed")
@@ -34,12 +36,20 @@ ap.add_argument("--nx", type=int, default=1024)
 ap.add_argument("--ny-total", type=int, default=2048)
 ap.add_argument("--t-end", type=float, default=120.0, help="compressed tier: simulated seconds")
 ap.add_argument("--steps", type=int, default=100, help="dense tier: number of steps")
+ap.add_argument("--rank-weights", default="",
+                help="compressed tier: comma-separated relative speeds, one per rank, for strips of "
+                     "unequal height (geoswe.partition); the digest must not change")
 a = ap.parse_args()
 
 NX, NY_glob = a.nx, a.ny_total
-assert NY_glob % N == 0
-NY_loc = NY_glob // N
-j0 = rank * NY_loc
+if a.rank_weights:
+    assert a.tier == "compressed", "--rank-weights: the dense tier here takes equal strips"
+    jb = strip_bounds(NY_glob, N, [float(x) for x in a.rank_weights.split(",")])
+    j0, NY_loc = jb[rank], jb[rank + 1] - jb[rank]
+else:
+    assert NY_glob % N == 0
+    NY_loc = NY_glob // N
+    j0 = rank * NY_loc
 
 H0, AMP = 10.0, 0.5
 xi = np.arange(NX, dtype=np.float64)[:, None]

@@ -5,6 +5,21 @@ All notable changes to GeoSWE are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) under the compatibility
 promise below.
 
+## [Unreleased]
+
+### Added
+
+- Strips sized by device speed. Under MPI a run cannot go faster than its slowest device, and
+  devices of one model differ: 1024 MI250X GCDs span 3.8 % in speed, 0.42 % standard deviation.
+  `geoswe.partition.strip_bounds` cuts a 1xN split by per-rank weights, and the run driver
+  takes them as `--rank-weights FILE` with `--compressed --balanced-partition`. The result
+  does not depend on the weights; without the option the partition is the one of 1.1.1.
+  With the weights `rank_speed.py` measures on a small dense problem the gain is small,
+  0.5 % per step on 1024 GCDs at one billion cells each: those speeds are not quite the
+  speeds of a run.
+  `benchmark/frontier_amd/rank_speed.py` measures the weights, and
+  `scaling_bench_flat.py --rank-weights` uses them in the weak-scaling benchmark.
+
 ## [1.1.1] - 2026-10-06
 
 Documentation and comments. No change to the solver, and no change to any result: the test

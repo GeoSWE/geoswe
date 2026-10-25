@@ -16,6 +16,7 @@ differently on AMD hardware.
 | `summarize_640m.py` | the tables of that job, from its CSV files |
 | `run_weak_1b.sbatch` | a power of two of nodes: weak scaling at one billion cells per GCD, from one GCD to all of them (128 nodes: 1.024 trillion cells) |
 | `node_check.py` | that job's pre-flight check of every node's GCDs |
+| `rank_speed.py` | the relative speed of every rank's GCD, from 30 s of a dense kernel: the weights of a speed-balanced partition |
 | `plot_weak_1b.py` | the figure of the billion-cell launches in the repository README; it holds their timings |
 
 ## Setting up
@@ -79,6 +80,19 @@ unpacks the tar file onto every node, so that a thousand Python processes do not
 start from the home file system, and checks every GCD first. It uses the largest
 power of two of nodes that pass, which is why the line above asks for two more
 than 128. Rebuild the tar file after changing the sources.
+
+```bash
+BALANCE=both T_TIME=600 sbatch -A <project> -p batch -N 130 -t 60 benchmark/frontier_amd/run_weak_1b.sbatch
+```
+
+`BALANCE=1` sizes each rank's strip by the speed `rank_speed.py` measures for its GCD just
+before the point, and `BALANCE=both` runs every point with equal strips and then with
+weighted ones on the same GCDs, which doubles the job. `T_TIME` is the simulated length of
+the timed window: 600 s is 506 steps and 80 s, a quarter of a percent finer than the default.
+`REPEATS=3` times three windows per point, one after the other; the summary reports the
+last and lists them all, since the speeds of some cards change during the first two
+minutes of a run. `CAL_SECONDS` and `CAL_LAST`, in tens of seconds, make the calibration
+longer and take the weights from its end; the default is 30 s, all of it.
 
 ## Results on one node
 
@@ -270,3 +284,63 @@ seconds per point, which is 253 steps at every size.
   the timed run.
 - The dense layout also fits: one GCD ran a billion cells at 172 ms/step in a
   60-step test, with 58 GiB of the device in use.
+
+**Strips sized by GCD speed.** 2026-10-06, v1.1.1, `BALANCE=both T_TIME=600` on 130
+nodes, 128 used: every point with equal strips and then, on the same GCDs, with strips
+proportional to the speeds `rank_speed.py` had just measured. One window of 492 steps
+and 78 s per point, so one tick of the timer is 0.13 %. One GCD: 157.11 ms/step.
+
+| GCDs | Nodes | Equal strips | Efficiency | Weighted strips | Efficiency | Gain |
+|---|---|---|---|---|---|---|
+| 8 | 1 | 158.74 ms/step | 99.0 % | 158.33 | 99.2 % | 0.26 % |
+| 16 | 2 | 158.54 | 99.1 % | 158.54 | 99.1 % | 0.00 % |
+| 32 | 4 | 159.15 | 98.7 % | 158.13 | 99.4 % | 0.64 % |
+| 64 | 8 | 159.15 | 98.7 % | 158.54 | 99.1 % | 0.38 % |
+| 128 | 16 | 159.35 | 98.6 % | 159.55 | 98.5 % | -0.13 % |
+| 256 | 32 | 159.55 | 98.5 % | 159.55 | 98.5 % | 0.00 % |
+| 512 | 64 | 161.18 | 97.5 % | 160.16 | 98.1 % | 0.63 % |
+| 1024 | 128 | 161.79 | 97.1 % | 160.98 | 97.6 % | 0.50 % |
+
+- Weighted strips are faster by 0.3 % on average and by 0.5 % on 1024 GCDs: a small
+  gain, a few ticks of the timer at each size.
+- The GCDs do differ. Over the 1024 the measured speeds have a standard deviation of
+  0.42 %, the slowest is 1.8 % below the mean and the fastest 2.0 % above; 13 are more
+  than 1 % slow. The measurement repeats: the same GCDs measured 13 minutes apart
+  agree to 0.05 % rms, and the slowest of each set is the same one both times.
+- Equal strips on 1024 GCDs would have to wait 1.9 % for the slowest one by that
+  measurement, and weighted strips recover a quarter of that. The weights are the
+  limit, not the strips: see below.
+- The job took 26 minutes 20 seconds, 57 node-hours, and no point failed. The run
+  driver takes the same weights (`--rank-weights`, with `--compressed
+  --balanced-partition`), and its rasters do not depend on them.
+
+**Why the gain is small: the weights.** 2026-10-07, two jobs on 16 nodes: 128 GCDs at
+one billion cells each on weighted strips, every step timed on every rank for four to
+five minutes (a wrapper around the solver's communicator and halo calls). The table
+gives the slowest rank's kernel time above the mean rank's, three to four minutes in,
+which is what a lockstep run loses to imbalance. Only the rows marked "as run" were
+run; the others rescale the per-rank kernel times of the same run to other strips.
+
+| Strips sized from | Job `5629873` | Job `5630044` |
+|---|---|---|
+| nothing: equal strips | 1.66 % | 1.60 % |
+| `rank_speed.py`, 30 s | 1.47 % (as run) | 0.95 % |
+| `rank_speed.py`, the last 30 s of 180 s | | 0.84 % (as run) |
+| the run's own speeds, a minute or more earlier | 0.2 to 0.5 % | 0.2 to 0.5 % |
+
+- The speeds `rank_speed.py` measures on a small dense problem are not quite those of
+  the run: 0.22 % rms apart over the 128 GCDs of the second job, with single GCDs
+  overrated by up to 0.8 %.
+- In the run, the speeds of some cards change during the first two minutes, by up to
+  1.4 % against the rest, the two GCDs of a card together (correlation 0.9). In
+  `rank_speed.py` they hardly move, 0.1 % rms over 180 s, so measuring for longer helps
+  little.
+- Temperature does not explain it: on the node that was monitored every 3 s, the cards
+  were as warm in the calibration as in the run to within 2 C, at a constant 1700 MHz.
+  A GCD's change of speed in the run goes with the power its card draws (correlation
+  -0.64 over the 128 GCDs). The cause is not established.
+- With these weights the step was 159.3 to 159.6 ms in the first 79 s and 159.1 to
+  160.1 ms later, against 157.7 ms for the mean rank's own share. Beside the imbalance
+  that leaves 0.1 ms of step-to-step jitter, 0.1 ms for the global `dt` to travel, and,
+  in the first 45 s of stepping only, one copy of 4 ms per rank in the halo send
+  (0.24 to 0.29 ms per step at this size; none with the GPU-aware halo).

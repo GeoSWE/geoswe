@@ -104,6 +104,11 @@ def test_the_documented_defaults_hold(name, value):
     assert got == value and type(got) is type(value), f"--{name.replace('_', '-')} = {got!r}"
 
 
+def test_rank_weights_is_off_by_default_and_names_a_file():
+    assert cli.parse(MINIMAL_ARGV).rank_weights is None
+    assert cli.parse(MINIMAL_ARGV + ["--rank-weights", "w.txt"]).rank_weights == "w.txt"
+
+
 @pytest.mark.parametrize("missing", ["--case", "--bc", "--out"])
 def test_the_three_inputs_are_required(missing):
     k = MINIMAL_ARGV.index(missing)
@@ -345,6 +350,64 @@ print("OK")
 '''
 
 
+_SCRIPT_RANK_WEIGHTS = _PRELUDE + r'''
+# --rank-weights sizes the strips of an MPI run with --compressed --balanced-partition by the
+# measured speed of each rank's device. Whether the weighted strips change the answer is a
+# question for real ranks (benchmark/frontier_amd/partition_check.py --rank-weights); what one
+# process can pin is that the file is never read and then ignored, and never trusted blindly.
+class FakeComm:
+    size = 2
+    rank = 0
+
+    def __init__(self):
+        self.aborted = []
+
+    def Barrier(self):
+        pass
+
+    def bcast(self, obj, root=0):
+        return obj
+
+    def Create_cart(self, dims, periods=None, reorder=False):
+        class Cart:
+            coords = (0, 0)
+
+            def Free(self):
+                pass
+        return Cart()
+
+    def Abort(self, code=0):
+        self.aborted.append(code)
+
+
+d = build(20.0)
+(d / "w2.txt").write_text("1.01\n0.99\n")
+(d / "w3.txt").write_text("1.0\n1.0\n1.0\n")
+
+# 1. one rank has no strips to size, and neither has an MPI run without the balanced split:
+#    refused on every rank, before the case is read (this one does not exist)
+for comm, extra in ((None, ["--compressed", "--balanced-partition"]), (FakeComm(), ["--compressed"]),
+                    (FakeComm(), ["--balanced-partition"])):
+    try:
+        run(d, "out_refused", extra + ["--rank-weights", str(d / "w2.txt")], comm=comm,
+            case=d / "missing.npz")
+        raise SystemExit(f"{extra} accepted --rank-weights")
+    except SystemExit as e:
+        assert "--rank-weights" in str(e) and "ignored" in str(e), e
+    assert comm is None or comm.aborted == [], comm.aborted
+
+# 2. a file for another number of ranks is an error where the strips are cut, and takes the job down
+comm = FakeComm()
+try:
+    run(d, "out_w3", ["--compressed", "--balanced-partition", "--rank-weights", str(d / "w3.txt")], comm=comm)
+    raise SystemExit("three weights were accepted for two ranks")
+except ValueError as e:
+    assert "3 weights for 2 ranks" in str(e), e
+assert comm.aborted == [1], comm.aborted
+print("OK")
+'''
+
+
 def _run_script(script, tmp_path, what):
     env = dict(os.environ)
     env["GEOSWE_BACKEND"] = "cupy"
@@ -372,6 +435,14 @@ def test_the_driver_says_when_the_fused_step_forcings_are_refused(tmp_path):
     pytest.importorskip("mpi4py")
     pytest.importorskip("rasterio")
     _run_script(_SCRIPT_FUSE, tmp_path, "the fused step forcings run")
+
+
+@pytest.mark.gpu
+def test_rank_weights_are_refused_where_ignored_and_checked_against_the_ranks(tmp_path):
+    pytest.importorskip("cupy")
+    pytest.importorskip("pandas")
+    pytest.importorskip("mpi4py")
+    _run_script(_SCRIPT_RANK_WEIGHTS, tmp_path, "the driver rank-weights run")
 
 
 @pytest.mark.gpu

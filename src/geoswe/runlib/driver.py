@@ -23,6 +23,7 @@ from ..mesh import Mesh2D
 from ..solver import Solver2D, Config
 from ..forcing import RainfallForcing
 from ..io_geotiff import GeoArray, write_geotiff
+from ..partition import strip_bounds
 from .case import load_case
 from . import _abort_all_ranks
 
@@ -197,6 +198,16 @@ def _run_case(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype, sponge_
     _balanced = args.balanced_partition and args.compressed and comm.size > 1
     if _balanced:
         dims = [1, comm.size]   # active-cell-balanced needs a 1xN y-split (variable-height ranks)
+    # --rank-weights: shares of the active cells by measured device speed, not equal ones.
+    # Only the balanced 1xN split has strips to size, so anywhere else the file would be read
+    # and then ignored; every rank evaluates this, so every rank exits.
+    rank_weights = None
+    if getattr(args, "rank_weights", None):
+        if not _balanced:
+            raise SystemExit("--rank-weights sizes the strips of an MPI run with --compressed "
+                             "--balanced-partition; without all three it would be ignored")
+        rank_weights = comm.bcast(np.loadtxt(args.rank_weights, ndmin=1) if comm.rank == 0 else None,
+                                  root=0)
 
     if comm.size > 1:
         cart = comm.Create_cart(dims, periods=[False, False], reorder=False)
@@ -272,17 +283,22 @@ def _run_case(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype, sponge_
         # shared y-faces (perp = full nxp, identical global active pattern) still line up.
         col_active = inside_glob.sum(axis=0).astype(np.int64)        # active cells per y-column
         cum = np.cumsum(col_active); target = float(cum[-1]) / comm.size
-        jbnd = [0] + [int(np.searchsorted(cum, (r + 1) * target)) for r in range(comm.size - 1)] + [ny_glob]
-        # searchsorted can repeat (zero-active y-runs) or overshoot (float rounding) ->
-        # zero-height ranks. Enforce strict monotonicity and fail loud if impossible.
-        for _r in range(1, comm.size):
-            jbnd[_r] = max(jbnd[_r], jbnd[_r - 1] + 1)
-        jbnd[comm.size] = ny_glob
-        if not all(jbnd[_r + 1] > jbnd[_r] for _r in range(comm.size)):
-            raise ValueError(f"active-balanced partition produced an empty rank (jbnd={jbnd}, "
-                             f"ny={ny_glob}, nranks={comm.size}) -- too many ranks for the active extent "
-                             f"(note: the greedy forward-bump split never lowers earlier cuts, so "
-                             f"near-duplicate cumulative counts can trip this conservatively)")
+        if rank_weights is not None:
+            # Shares proportional to the devices' measured speeds (geoswe.partition): the ranks
+            # wait for each other every step, so equal shares run at the slowest device's pace.
+            jbnd = strip_bounds(col_active, comm.size, rank_weights)
+        else:
+            jbnd = [0] + [int(np.searchsorted(cum, (r + 1) * target)) for r in range(comm.size - 1)] + [ny_glob]
+            # searchsorted can repeat (zero-active y-runs) or overshoot (float rounding) ->
+            # zero-height ranks. Enforce strict monotonicity and fail loud if impossible.
+            for _r in range(1, comm.size):
+                jbnd[_r] = max(jbnd[_r], jbnd[_r - 1] + 1)
+            jbnd[comm.size] = ny_glob
+            if not all(jbnd[_r + 1] > jbnd[_r] for _r in range(comm.size)):
+                raise ValueError(f"active-balanced partition produced an empty rank (jbnd={jbnd}, "
+                                 f"ny={ny_glob}, nranks={comm.size}) -- too many ranks for the active extent "
+                                 f"(note: the greedy forward-bump split never lowers earlier cuts, so "
+                                 f"near-duplicate cumulative counts can trip this conservatively)")
         Nx_loc = nx_glob
         i0_glob = 0; i1_glob = nx_glob
         j0_glob = jbnd[cy]; j1_glob = jbnd[cy + 1]; Ny_loc = j1_glob - j0_glob
@@ -290,6 +306,11 @@ def _run_case(args, *, comm, gauge_csv_map, tide_dir, t0_ts, proc_dtype, sponge_
         say(f"Global grid: {nx_glob}x{ny_glob}  dx={dx}  ACTIVE-BALANCED 1x{comm.size} (max/mean="
             f"{_amax/(cum[-1]/comm.size):.3f}); rank{comm.rank} j[{j0_glob},{j1_glob}) Ny={Ny_loc} "
             f"({int(col_active[j0_glob:j1_glob].sum())/1e6:.2f}M active)")
+        if rank_weights is not None:
+            _per_w = [col_active[jbnd[r]:jbnd[r + 1]].sum() / rank_weights[r] for r in range(comm.size)]
+            say(f"  strips weighted by --rank-weights (weights {rank_weights.min():.4f} to "
+                f"{rank_weights.max():.4f}): active cells over weight, max/mean="
+                f"{max(_per_w) / (sum(_per_w) / comm.size):.4f}")
     else:
         # Pad grid up to a dims-divisible size by extending bed with last row/col.
         # (Cheaper than truncating since we want the case file's full extent.)

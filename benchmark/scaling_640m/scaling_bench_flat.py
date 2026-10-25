@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.expandvars("${GEOSWE_DATA_ROOT}"))
 from geoswe.mesh import Mesh2D
 from geoswe.solver import Solver2D, Config
 from geoswe.compressed_solver import CompressedSolver
+from geoswe.partition import strip_bounds
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--mode", choices=["weak", "strong"], required=True)
@@ -41,6 +42,10 @@ ap.add_argument("--direct", action="store_true",
                      "stand-in (fields uploaded f32, each freed as soon as it is packed). "
                      "Cuts the build transient ~178 -> ~71 B/cell so >600M cells/rank fit "
                      "a 47.4 GB slice. Stepping path identical.")
+ap.add_argument("--rank-weights", default="",
+                help="a file with one relative device speed per rank. The strips then hold shares "
+                     "of the same global grid proportional to those speeds instead of equal ones, "
+                     "so that unequal devices finish a step together (geoswe.partition).")
 a = ap.parse_args()
 
 NX = a.nx
@@ -51,6 +56,25 @@ else:
     assert NY_glob % N == 0
     NY_loc = NY_glob // N
 j0 = rank * NY_loc
+CELLS_RANK = NX * NY_loc        # the per-rank figure of the report: the mean, when the strips differ
+if a.rank_weights:
+    w = np.loadtxt(a.rank_weights, ndmin=1).astype(np.float64)
+    # A strip and its two ghost rows of 4 must stay under 32768 rows (the int16 neighbour
+    # table), so a device faster than that allows gets the tallest strip there is and the
+    # others share the rest by their weights.
+    ny_max, free = 32758, np.ones(w.size, bool)
+    while True:
+        per_weight = (NY_glob - ny_max * (~free).sum()) / w[free].sum()
+        over = free & (w * per_weight > ny_max)
+        if not over.any():
+            break
+        free &= ~over
+        if not free.any():
+            sys.exit(f"--rank-weights: {N} strips of at most {ny_max} rows cannot hold {NY_glob} rows")
+    if rank == 0 and not free.all():
+        print(f"[scaling_640m-flat] --rank-weights: {int((~free).sum())} strip(s) capped at {ny_max} rows", flush=True)
+    jb = strip_bounds(NY_glob, N, np.where(free, w * per_weight, ny_max))
+    j0, NY_loc = jb[rank], jb[rank + 1] - jb[rank]
 
 # --- identical synthetic setup to scaling_bench.py ---
 H0, AMP = 10.0, 0.5
@@ -142,7 +166,7 @@ if a.repeats > 0:
         ms_all.append(w_r / max(st_r, 1) * 1000.0)
         if rank == 0:
             print(f"[scaling_640m-flat] mode={a.mode} N={N:2d} rep={r} ms/step={ms_all[-1]:8.3f} "
-                  f"steps={st_r} total={NX*NY_glob/1e9:6.3f}B per-rank={NX*NY_loc/1e6:6.1f}M", flush=True)
+                  f"steps={st_r} total={NX*NY_glob/1e9:6.3f}B per-rank={CELLS_RANK/1e6:6.1f}M", flush=True)
     gmib = comm.reduce(cp.get_default_memory_pool().used_bytes()/1048576.0, op=MPI.MAX, root=0)
     if rank == 0:
         import statistics as _stat
@@ -154,7 +178,7 @@ if a.repeats > 0:
         with open(a.out, "a") as f:
             if new: f.write("tier,mode,N,ms_per_step,steps,cells_total,cells_per_rank,gpu_mib_max\n")
             for msv in ms_all:
-                f.write(f"flat-full,{a.mode},{N},{msv:.4f},{st_r},{NX*NY_glob},{NX*NY_loc},{gmib:.0f}\n")
+                f.write(f"flat-full,{a.mode},{N},{msv:.4f},{st_r},{NX*NY_glob},{CELLS_RANK},{gmib:.0f}\n")
     sys.exit(0)
 
 def steps_of(t_end):
@@ -180,7 +204,7 @@ sA, wA = steps_of(a.t_a)
 sB, wB = steps_of(a.t_b)
 ms = (wB - wA) / max(sB - sA, 1) * 1000.0
 st_t = sB - sA
-cells_loc, cells_tot = NX*NY_loc, NX*NY_glob
+cells_loc, cells_tot = CELLS_RANK, NX*NY_glob
 gmib = comm.reduce(cp.get_default_memory_pool().used_bytes()/1048576.0, op=MPI.MAX, root=0)
 if rank == 0:
     print(f"[scaling_640m-flat] mode={a.mode} N={N:2d} ms/step={ms:8.3f} steps={st_t} "
