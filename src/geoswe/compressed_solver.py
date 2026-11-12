@@ -2470,7 +2470,7 @@ def _step_loop(st, *, q0, q1, q2, bed_f, sig_f, mcls_f, m_tab, inv_sig_f,
     if comm is not None:
         _bench_peak_mib = comm.allreduce(_bench_peak_mib, _MPI.MAX)
     if rank == 0:
-        say(f"  [compressed] DONE t={t/3600:.3f}h steps={steps} in {_bench_compute_wall:.1f}s")
+        say(f"  [compressed] DONE t={t/3600:.3f}h steps={steps} in {_bench_compute_wall:.3f}s")
         if _vcap_count:
             say(f"  [vcap-count] activations={_vcap_hits} over {_vcap_steps} steps "
                 f"(max in one step {_vcap_maxstep}; active cells {int(act.sum())})")

@@ -127,7 +127,7 @@ A leg stopped by the deadline ends like this:
 ```text
   [wall-limit] deadline reached at t=0.5278h step=5600 -> FINAL checkpoint + stop (resume next session with --resume)
   [ckpt] saved (final) t=0.528h step=5600 -> out_ckpt/checkpoints
-  [compressed] DONE t=0.528h steps=5600 in 0.5s
+  [compressed] DONE t=0.528h steps=5600 in 0.512s
 ```
 
 and the next one opens with the `RESUMED` line. An interrupted leg prints `DONE`

@@ -52,6 +52,9 @@ promise below.
   compares what arrived. That test stops the job with the remedy in the log, because a
   segmentation fault cannot be caught. Ranks that disagree on the switch are told so there
   instead of waiting for each other. Results are unchanged on either path.
+- The time in the step loop's `DONE` line had one decimal (`in 2.1s`), and the benchmark's
+  repeat timing is read from that line: at a 2 s window the rounding alone was 2.5 % of the
+  time per step. It has three now (`in 2.104s`).
 
 ## [1.1.1] - 2026-10-06
 
