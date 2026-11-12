@@ -114,7 +114,11 @@ the pointers to MPI. With HPE Cray MPICH this needs two more things:
 
 If `SWE_HALO_CUDA_AWARE=1` is set while Cray MPICH runs without its GPU support,
 GeoSWE warns and stages through the host instead of passing device pointers to a
-library that would treat them as host memory.
+library that would treat them as host memory. Other libraries are asked directly,
+through `MPIX_Query_rocm_support` (Open MPI 5) or `MPIX_Query_hip_support` (MPICH),
+with the same fallback when the answer is no. The path that stays on is tested
+with one exchange per halo face before the run, as on NVIDIA
+([multi-GPU and MPI](multigpu_mpi.md)).
 
 ## OLCF Frontier
 

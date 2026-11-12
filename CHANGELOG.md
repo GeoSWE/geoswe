@@ -27,6 +27,8 @@ promise below.
   speeds of a run.
   `benchmark/frontier_amd/rank_speed.py` measures the weights, and
   `scaling_bench_flat.py --rank-weights` uses them in the weak-scaling benchmark.
+- `tests/test_halo_gpu_aware.py`: the probe and the start-up test of the GPU-aware halo,
+  against stand-ins for an MPI library and its ranks.
 
 ### Changed
 
@@ -36,6 +38,20 @@ promise below.
   masked h_max is built in place (2 B/cell). That start was the device-memory peak of a large
   rank: 41 B/cell in the flat weak-scaling benchmark with the switches above, now 39 (1.6 billion
   cells on one GCD, one rank or many).
+
+### Fixed
+
+- `SWE_HALO_CUDA_AWARE=1` on an MPI library without GPU support ended in a segmentation
+  fault in every rank instead of the documented fallback to host staging. The probe asked
+  through `MPI.Query_cuda_support`, which mpi4py does not have, so it always trusted the
+  variable. It now asks the library itself (`MPIX_Query_cuda_support`; on AMD
+  `MPIX_Query_rocm_support` or `MPIX_Query_hip_support`, so that a CUDA answer cannot switch
+  off a path that works there) and falls back with a warning when the answer is no. A library
+  can report the support and still fail between two ranks, so a path that stays on is tested
+  before the run: every rank exchanges one buffer per halo face with its neighbour and
+  compares what arrived. That test stops the job with the remedy in the log, because a
+  segmentation fault cannot be caught. Ranks that disagree on the switch are told so there
+  instead of waiting for each other. Results are unchanged on either path.
 
 ## [1.1.1] - 2026-10-06
 

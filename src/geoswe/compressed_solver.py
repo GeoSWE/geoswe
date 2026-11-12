@@ -1188,6 +1188,16 @@ class CompressedHalo:
             + ". The ranks that name a neighbour are the misaligned pair; rebuild the cache "
               "for this rank count, or fix the rank-to-block mapping.")
 
+    def check_gpu_aware(self):
+        """One-time collective test of the GPU-aware path (SWE_HALO_CUDA_AWARE=1): exchange
+        every face's own device buffers with its neighbour and compare what arrived. On the
+        host-staged path the ranks only agree that it is one. After ``check_alignment``, so
+        both ends of a face agree on its size. See ``mpi_halo.check_gpu_aware_exchange`` for
+        why this stops the job instead of falling back."""
+        from .mpi_halo import check_gpu_aware_exchange
+        check_gpu_aware_exchange(self.comm, self.cuda_aware,
+                                 [(f["nbr"], f["sdense"], f["rdense"]) for f in self.faces])
+
     def exchange(self, q0, q1, q2):
         """Exchange the ngh boundary ROWS densely (fixed ngh x perp size, always
         matches across ranks), scattering received values only into each rank's
@@ -2788,6 +2798,7 @@ def run_cached(cache_dir, *, inflows=None, t_end, frame_every_s, out_dir, cfl=0.
             faces_meta.append(fm)
         halo = CompressedHalo.from_saved(comm, meta["ngh"], faces_meta)
         halo.check_alignment()
+        halo.check_gpu_aware()
         pl = meta["placement"]
         mpi_bundle = dict(comm=comm, halo=halo, i0=pl["i0"], j0=pl["j0"],
                           nx_loc=pl["nx_loc"], ny_loc=pl["ny_loc"])
@@ -3069,6 +3080,7 @@ class CompressedSolver:
         if comm is not None and comm.size > 1:
             halo = CompressedHalo(comm, dims, cs.cm.active_id_padded, nxp, nyp, ngh)
             halo.check_alignment()
+            halo.check_gpu_aware()
             mpi_bundle = dict(comm=comm, halo=halo, i0=int(i0_glob), j0=int(j0_glob),
                               nx_loc=int(Nx_loc), ny_loc=int(Ny_loc))
             say(f"  [compressed] rank{comm.rank} MPI halo faces: "

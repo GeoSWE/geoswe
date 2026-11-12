@@ -15,9 +15,12 @@ The CUDA-aware MPI path is enabled by ``SWE_HALO_CUDA_AWARE=1``. When the
 MPI build does not support CUDA (Open MPI without ``--with-cuda``), the
 default host-staging path is used: pack → ``cp.asnumpy`` → MPI →
 ``cp.asarray`` → unpack. Functionally identical, ~3-10× slower depending
-on PCIe bandwidth. For multi-GPU production runs, build mpi4py against an
-MPI with native CUDA support (Open MPI ``--with-cuda``, MPICH ``--with-cuda``,
-or HPE Cray MPICH with ``MPICH_GPU_SUPPORT_ENABLED=1``). On AMD GPUs the same
+on PCIe bandwidth. A library that says it has no such support is not handed
+device buffers (``probe_cuda_aware``), and one that says it has, or cannot be
+asked, is tested with one exchange before the run
+(``check_gpu_aware_exchange``). For multi-GPU production runs, build mpi4py
+against an MPI with native CUDA support (Open MPI ``--with-cuda``, MPICH
+``--with-cuda``, or HPE Cray MPICH with ``MPICH_GPU_SUPPORT_ENABLED=1``). On AMD GPUs the same
 switch selects GPU-aware MPI: CuPy's ROCm build exposes device arrays through
 the same ``__cuda_array_interface__``, and Cray MPICH moves them through its
 GPU transport layer.
@@ -66,33 +69,87 @@ def _cray_mpich_gpu_support_off():
     return os.environ.get("MPICH_GPU_SUPPORT_ENABLED", "0") != "1"
 
 
+def _gpu_stack():
+    """``"hip"`` when CuPy is the ROCm build (AMD), ``"cuda"`` otherwise; ``None`` without CuPy."""
+    try:
+        import cupy as cp
+        from .backend import _platform_of
+        return _platform_of(cp)
+    except Exception:
+        return None
+
+
+def _gpu_query_names(stack):
+    """The MPI library's own queries for device-buffer support on a GPU stack, in the
+    order to try them: Open MPI and MPICH share the CUDA one and name the AMD one
+    differently (``rocm`` in Open MPI 5, ``hip`` in MPICH)."""
+    if stack == "hip":
+        return ("MPIX_Query_rocm_support", "MPIX_Query_hip_support")
+    return ("MPIX_Query_cuda_support",)
+
+
+def _mpi_reports_gpu_support():
+    """What the MPI library says about taking device buffers of this GPU stack.
+
+    ``True`` or ``False`` when the library answers, ``None`` when it cannot be asked.
+    mpi4py has no call for this, so the library's own query is reached through the
+    extension module that mpi4py already loaded. The query is the one of the stack in
+    use: asking about CUDA on an AMD device would switch off a path that works there.
+
+    HPE Cray MPICH is not asked: its GPU support is switched per job by
+    ``MPICH_GPU_SUPPORT_ENABLED``, which ``_cray_mpich_gpu_support_off`` reads.
+    """
+    import ctypes
+    try:
+        if "CRAY MPICH" in MPI.Get_library_version().upper():
+            return None
+        stack = _gpu_stack()
+        if stack is None:
+            return None
+        lib = ctypes.CDLL(MPI.__file__)   # dlsym on this handle searches its dependencies
+    except Exception:
+        return None
+    for name in _gpu_query_names(stack):
+        try:
+            query = getattr(lib, name)
+        except AttributeError:   # this library has no such query
+            continue
+        query.restype = ctypes.c_int
+        query.argtypes = []
+        try:
+            return bool(query())
+        except Exception:
+            return None
+    return None
+
+
 def probe_cuda_aware(comm):
     """Resolve SWE_HALO_CUDA_AWARE against the actual MPI build.
 
-    Returns True only if the env var requests the CUDA-aware path AND the MPI
-    library (when it exposes Query_cuda_support) confirms support; otherwise
-    warns once on rank 0 and returns False so device pointers are never handed
-    to a host-only MPI (segfault / garbage transmit). Shared by Halo2D and
-    CompressedHalo so the two halo paths cannot disagree.
+    Returns True only if the env var requests the GPU-aware path AND the MPI library
+    does not say that it lacks the support; otherwise warns once on rank 0 and returns
+    False, so device pointers are never handed to a host-only MPI (segfault / garbage
+    transmit). Shared by Halo2D and CompressedHalo so the two halo paths cannot disagree.
+
+    A library's "yes" is not proof: a build can report the support and still fail on the
+    path between two ranks. ``check_gpu_aware_exchange`` therefore tests the path that
+    this function switches on, once, before the run.
 
     "CUDA-aware" is the historical name: the same switch selects GPU-aware MPI
     on AMD GPUs (device pointers through HPE Cray MPICH's GPU transport layer).
     """
     import os
     requested = os.environ.get("SWE_HALO_CUDA_AWARE", "0") == "1"
-    if requested and MPI is not None:
-        try:
-            if not MPI.Query_cuda_support():
-                if comm is None or comm.rank == 0:
-                    import warnings
-                    warnings.warn(
-                        "SWE_HALO_CUDA_AWARE=1 set but MPI.Query_cuda_support() "
-                        "returned False. Disabling the CUDA-aware path (host "
-                        "staging) to avoid segfault/garbage transmit.",
-                        RuntimeWarning, stacklevel=2)
-                requested = False
-        except AttributeError:
-            pass   # older mpi4py / non-OpenMPI: probe unavailable, trust the env
+    if requested and MPI is not None and _mpi_reports_gpu_support() is False:
+        if comm is None or comm.rank == 0:
+            import warnings
+            warnings.warn(
+                "SWE_HALO_CUDA_AWARE=1 set but the MPI library reports no support for "
+                "device buffers of this GPU (its MPIX_Query_*_support() returned 0). "
+                "Disabling the GPU-aware path (host staging) to avoid segfault/garbage "
+                "transmit.",
+                RuntimeWarning, stacklevel=2)
+        requested = False
     if requested and MPI is not None and _cray_mpich_gpu_support_off():
         if comm is None or comm.rank == 0:
             import warnings
@@ -103,6 +160,97 @@ def probe_cuda_aware(comm):
                 RuntimeWarning, stacklevel=2)
         requested = False
     return requested
+
+
+_GPU_AWARE_REMEDY = "Set SWE_HALO_CUDA_AWARE=0 to stage the halo through host memory."
+_gpu_aware_announced = False    # the line below is printed once per process
+
+
+def _gpu_aware_pattern(rank, n, dtype):
+    """Values a rank sends in the start-up test: whole numbers below 65521, exact in
+    float32, that differ from element to element and from rank to rank."""
+    import cupy as cp
+    return ((cp.arange(n, dtype=cp.int64) * 31 + 17 * (int(rank) % 65521)) % 65521).astype(dtype)
+
+
+def check_gpu_aware_exchange(comm, enabled, faces):
+    """Exchange device buffers once with every halo neighbour and compare what arrived.
+
+    ``enabled`` is this rank's switch as ``probe_cuda_aware`` resolved it. Every rank
+    calls this, with the switch on or off, and the ranks compare it first: a variable
+    that did not reach every node would otherwise leave some ranks in this test and the
+    others past it, and the job would hang. With the switch off everywhere there is
+    nothing else to do.
+
+    ``faces`` lists ``(neighbour rank, send buffer, receive buffer)``, the device arrays
+    of one halo face each. They should be the size the run exchanges, because a library
+    moves small and large messages differently and a small one can pass where the halo
+    fails. The neighbour has to be the real one, not this rank: the failures seen were
+    between ranks, on the shared-memory and network paths.
+
+    All faces go out at once, as non-blocking sends and receives: that is what the run
+    posts with the halo/compute overlap on, it does not depend on the order in which
+    the ranks reach each other, and it takes the time of one exchange on any number of
+    ranks. Two faces that share a neighbour (a periodic axis) have the same size and
+    expect the same values, so they may pair either way.
+
+    This is a test that stops the job, not a fallback. A library that cannot take a
+    device pointer may raise an MPI error, deliver other values, or take the process
+    down with a segmentation fault, and the last of these cannot be caught. Rank 0
+    therefore says what is being tested before any rank hands a device buffer to MPI
+    (the barrier orders the two), so that a log that ends here carries the remedy.
+    Values that differ raise on every rank; an MPI error aborts the job, since the
+    neighbours of the rank that got it would otherwise wait for it until the wall clock.
+
+    Collective: every rank of ``comm`` calls it at the same point. The buffers are zero
+    on return.
+    """
+    import sys
+    flags = comm.allgather(bool(enabled))
+    if any(f != flags[0] for f in flags):
+        raise RuntimeError(
+            "SWE_HALO_CUDA_AWARE differs across ranks -- propagate it identically via "
+            "mpirun -x (the ranks would otherwise split between the host and the device "
+            "halo and hang)")
+    if not enabled or comm.size == 1:
+        return
+    import cupy as cp
+    global _gpu_aware_announced
+    if comm.rank == 0 and not _gpu_aware_announced:
+        print("  [halo] SWE_HALO_CUDA_AWARE=1: testing GPU-aware MPI with one exchange of "
+              "device buffers per halo face. If the job stops here, the MPI library cannot "
+              "take device buffers on this path. " + _GPU_AWARE_REMEDY, flush=True)
+        _gpu_aware_announced = True
+    comm.Barrier()
+    for nbr, sbuf, rbuf in faces:
+        sbuf[...] = _gpu_aware_pattern(comm.rank, sbuf.size, sbuf.dtype).reshape(sbuf.shape)
+        rbuf.fill(-1)
+    cp.cuda.get_current_stream().synchronize()   # the fills are done before MPI reads
+    try:
+        reqs = [comm.Irecv(rbuf, source=nbr) for nbr, _, rbuf in faces]
+        reqs += [comm.Isend(sbuf, dest=nbr) for nbr, sbuf, _ in faces]
+        MPI.Request.Waitall(reqs)
+    except MPI.Exception as exc:
+        print(f"!! rank {comm.rank} of {comm.size}: the GPU-aware MPI test failed with "
+              f"{type(exc).__name__}: {exc}\n!! {_GPU_AWARE_REMEDY}\n!! aborting the job: "
+              f"the other ranks would otherwise wait for this one until the wall clock",
+              file=sys.stderr, flush=True)
+        sys.stdout.flush()
+        comm.Abort(1)
+    bad = []
+    for nbr, sbuf, rbuf in faces:
+        want = _gpu_aware_pattern(nbr, rbuf.size, rbuf.dtype).reshape(rbuf.shape)
+        if not bool((rbuf == want).all()):
+            bad.append(int(nbr))
+        sbuf.fill(0)
+        rbuf.fill(0)
+    if not comm.allreduce(1 if bad else 0, MPI.MAX):
+        return
+    raise RuntimeError(
+        "SWE_HALO_CUDA_AWARE=1, but device buffers do not cross MPI intact: "
+        + (f"what this rank received from rank(s) {bad} is not what they sent"
+           if bad else "this rank's faces arrived intact, another rank's did not")
+        + ". " + _GPU_AWARE_REMEDY)
 
 
 def _check_face_extent(side, nbr, mine, theirs):
@@ -188,8 +336,9 @@ class Halo2D:
         # use direct device pointers (requires CUDA-aware MPI build).
         # Probe the MPI library on init so a mismatch between the env var
         # and the actual MPI build doesn't silently transmit garbage /
-        # segfault. Probe is best-effort; not all MPI implementations expose
-        # Query_cuda_support().
+        # segfault. The probe is best-effort (not every library can be asked,
+        # and one that answers yes can still fail), so the path it switches on
+        # is tested at the end of this constructor.
         self.cuda_aware = probe_cuda_aware(comm)
 
         # Lazy-allocated send/recv buffers keyed by leading dimension.
@@ -206,6 +355,7 @@ class Halo2D:
         # Last, after every local check: the face extents come from THIS rank's padding
         # alone (see _get_bufs), with nothing asking the neighbour.
         self._negotiate_face_extent()
+        self._check_gpu_aware()
 
     # ------------------------------------------------------------------
     def _negotiate_face_extent(self):
@@ -235,6 +385,27 @@ class Halo2D:
         theirs = [self.cart.sendrecv(mine, dest=nbr, source=nbr) for _, nbr in faces]
         for (side, nbr), t in zip(faces, theirs):
             _check_face_extent(side, nbr, mine, t)
+
+    def _check_gpu_aware(self):
+        """Test the GPU-aware path once, on buffers the size of a three-component face
+        (a no-op on the host-staged path, apart from the ranks agreeing that it is one).
+
+        After ``_negotiate_face_extent``, so both ends of a face size it the same way.
+        The buffers are this test's own: the exchange allocates its buffers per leading
+        dimension on first use.
+        """
+        faces = []
+        if self.cuda_aware:
+            import cupy as cp
+            for side in ("x-", "x+", "y-", "y+"):
+                nbr = self._neighbor(side)
+                if nbr == MPI.PROC_NULL:
+                    continue
+                shape = ((3, self.ngh, self.nyp) if side.startswith("x")
+                         else (3, self.nxp, self.ngh))
+                faces.append((nbr, cp.empty(shape, dtype=self.dtype),
+                              cp.empty(shape, dtype=self.dtype)))
+        check_gpu_aware_exchange(self.cart, self.cuda_aware, faces)
 
     # ------------------------------------------------------------------
     def has_neighbor(self, side: str) -> bool:

@@ -338,6 +338,42 @@ to reach the ranks. That applies to the levers above as well as to these diagnos
 and `SWE_HMIN_CFL` is the one to watch: a rank that does not see it falls back to a
 CFL floor coupled to `h_min` and says nothing (`benchmark/pinellas_3m/README.md`).
 
+## The job stops after `testing GPU-aware MPI`
+
+```text
+  [halo] SWE_HALO_CUDA_AWARE=1: testing GPU-aware MPI with one exchange of device buffers per halo face. If the job stops here, the MPI library cannot take device buffers on this path. Set SWE_HALO_CUDA_AWARE=0 to stage the halo through host memory.
+```
+
+Every multi-rank run with `SWE_HALO_CUDA_AWARE=1` prints this line once, and a run
+whose MPI takes device buffers carries on after it. If the log ends there, usually
+with a segmentation fault in every rank or an MPI error, the library was handed a
+device pointer it could not use. Set `SWE_HALO_CUDA_AWARE=0`: the halo then travels
+through page-locked host memory, with identical results. To keep the GPU-aware path,
+the MPI library has to be built with GPU support and the transport between the ranks
+has to be one that carries it (with Open MPI, the UCX one); the site's documentation
+names the settings.
+
+The test exists because the library's own answer is not enough. GeoSWE asks it first
+and falls back to host staging when it reports no support:
+
+```text
+RuntimeWarning: SWE_HALO_CUDA_AWARE=1 set but the MPI library reports no support for device buffers of this GPU (its MPIX_Query_*_support() returned 0). Disabling the GPU-aware path (host staging) to avoid segfault/garbage transmit.
+```
+
+A library can report the support and still fail between two ranks, though, and a
+segmentation fault cannot be caught and turned into a fallback. The other two ways
+the test can end name the remedy themselves:
+
+```text
+RuntimeError: SWE_HALO_CUDA_AWARE=1, but device buffers do not cross MPI intact: what this rank received from rank(s) [1] is not what they sent. Set SWE_HALO_CUDA_AWARE=0 to stage the halo through host memory.
+```
+
+```text
+!! rank 1 of 2: the GPU-aware MPI test failed with Exception: MPI_ERR_IN_STATUS: error code in status
+!! Set SWE_HALO_CUDA_AWARE=0 to stage the halo through host memory.
+!! aborting the job: the other ranks would otherwise wait for this one until the wall clock
+```
+
 ## One rank failed and the job stopped
 
 ```text

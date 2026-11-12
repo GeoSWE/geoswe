@@ -281,9 +281,13 @@ one variable, so measure between them.
 5. **`SWE_HALO_CUDA_AWARE=1`** on multi-GPU runs whose GPUs have peer access:
    the published 3 m benchmark campaign sets it. The default is `0`, host-staged,
    which is the correct value on MIG slices and anywhere without peer access.
-   Setting it to 1 is safe to try, because both halo paths probe the MPI build
-   and demote to host staging with a warning when it reports no GPU support. See
-   [multi-GPU and MPI](multigpu_mpi.md) and, on AMD, [AMD GPUs](amd_gpus.md).
+   Setting it to 1 is safe to try. Both halo paths ask the MPI library and demote
+   to host staging with a warning when it reports no GPU support, and a library
+   that reports the support is tested with one exchange per halo face before the
+   run. A library that fails that test stops the job at start-up, with a line in
+   the log that says to set the variable back to 0
+   ([troubleshooting](troubleshooting.md#the-job-stops-after-testing-gpu-aware-mpi)).
+   See [multi-GPU and MPI](multigpu_mpi.md) and, on AMD, [AMD GPUs](amd_gpus.md).
 6. **`SWE_FLAT_BEDGRAD_PRECOMP=1`** on the compressed tier. The flat path reaches
    the $\pm 2$ bed values through a chain of two neighbour-table lookups per
    direction per cell per step; this precomputes the cell-centred bed gradients
@@ -358,6 +362,13 @@ ranks that disagree would hang instead of failing:
 
 ```text
 RuntimeError: SWE_HALO_OVERLAP / SWE_HALO_CUDA_AWARE differ across ranks -- propagate them identically via mpirun -x (ranks would otherwise split between blocking/overlap or host/device halo and hang)
+```
+
+A `SWE_HALO_CUDA_AWARE` that differs is caught before that, when the halo is built
+and its GPU-aware path is tested, with a message of its own:
+
+```text
+RuntimeError: SWE_HALO_CUDA_AWARE differs across ranks -- propagate it identically via mpirun -x (the ranks would otherwise split between the host and the device halo and hang)
 ```
 
 The same loop guards two more disagreements, both of which would otherwise be

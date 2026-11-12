@@ -87,6 +87,16 @@ quietly computes something else, depending on the variable; see
 [performance](performance.md), which also covers measuring where a run's
 per-step time goes before changing anything.
 
+An MPI library that cannot take device pointers does not refuse them: it reads
+them as host memory, and the ranks end with a segmentation fault. Two checks stand
+in front of that. GeoSWE asks the library first (`MPIX_Query_cuda_support`, or the
+ROCm query on AMD) and falls back to host staging, with a warning, when the
+library says it has no such support. A library that says it has, or that cannot be
+asked, is tested before the run: every rank exchanges one buffer per halo face
+with its neighbour and compares what arrived. That test stops the job instead of
+falling back, because a segmentation fault cannot be caught; see
+[troubleshooting](troubleshooting.md#the-job-stops-after-testing-gpu-aware-mpi).
+
 On AMD GPUs the same variable selects GPU-aware MPI. With HPE Cray MPICH that
 also needs `MPICH_GPU_SUPPORT_ENABLED=1` and an `mpi4py` linked against the GPU
 transport library; GeoSWE falls back to host staging, with a warning, when Cray
