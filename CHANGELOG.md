@@ -67,6 +67,11 @@ promise below.
 - The time in the step loop's `DONE` line had one decimal (`in 2.1s`), and the benchmark's
   repeat timing is read from that line: at a 2 s window the rounding alone was 2.5 % of the
   time per step. It has three now (`in 2.104s`).
+- The two-rank inlet test (`tests/test_gpu_mpi_inflow.py`) gave its ranks an environment
+  without the site's MPI settings, and waited 900 s on a machine whose default transport
+  hangs. The ranks now inherit `OMPI_MCA_*`, `UCX_*`, `MPICH_*` and the like (settings, not
+  a launcher's or a scheduler's job state), the launcher stops a job that has not finished in
+  300 s, and the failure says what to check.
 
 ## [1.1.1] - 2026-10-06
 
