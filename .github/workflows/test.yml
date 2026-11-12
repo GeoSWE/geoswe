@@ -69,7 +69,9 @@ jobs:
     # and no GPU (the test's own constants hold the counts). It is a proxy for
     # NVRTC, not a replacement for the on-device test (see the module docstring).
     name: CUDA kernel sources (nvcc, no device)
-    runs-on: ubuntu-latest
+    # 24.04 by name, not ubuntu-latest: NVIDIA's package repository for Ubuntu 26.04
+    # starts at CUDA 13.3, and the install of 12.6.3 below fails there (apt exit 100).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
