@@ -72,6 +72,8 @@ promise below.
   hangs. The ranks now inherit `OMPI_MCA_*`, `UCX_*`, `MPICH_*` and the like (settings, not
   a launcher's or a scheduler's job state), the launcher stops a job that has not finished in
   300 s, and the failure says what to check.
+- Three tests of the MRMS reader skipped in every CI job, because no job installed xarray.
+  The job with the extras installs it.
 
 ## [1.1.1] - 2026-10-06
 

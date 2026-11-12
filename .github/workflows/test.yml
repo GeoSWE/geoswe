@@ -46,11 +46,15 @@ jobs:
       # [test] brings scipy, [io] rasterio and pyproj, [forcings] pandas: the
       # declared extras, so this job exercises what users install.
       - run: pip install -e ".[test,io,forcings]"
+      # xarray is in no extra on purpose (data_prep.py says why: its GRIB engine,
+      # cfgrib with eccodes, is not a wheel to depend on). The three tests of the
+      # xarray paths that need no GRIB engine skipped in every job; here they run.
+      - run: pip install xarray
       # A wheel that failed to resolve would leave every importorskip skipping
       # and this job green, which is the hole it exists to close. Fail here.
       - name: The extras must actually be importable
         run: |
-          python -c "import pandas, rasterio, pyproj, scipy"
+          python -c "import pandas, rasterio, pyproj, scipy, xarray"
           python -c "import geoswe.forcing, geoswe.io_geotiff, geoswe.data_prep, geoswe.gauges"
       # -rs: the skip list is the evidence that the ingestion tests ran.
       - run: pytest -m "not gpu" -o addopts="" -q -rs
