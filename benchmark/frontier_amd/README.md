@@ -153,7 +153,8 @@ two launches each on the dense tier, which agree to 0.1 %):
 | `fast` | 25.51 | 23.48 |
 
 The dense tier is `examples/ex05_scaling_bench.py`; the compressed tier is
-`../scaling_640m/scaling_bench_flat.py` in its differential-timing mode. Both use
+`../scaling_640m/scaling_bench_flat.py` in its differential-timing mode (`--differential`
+now, the script's default then). Both use
 default settings, which differ from the configuration pinned for the paper's
 scaling figure (`../scaling_640m/README.md`), so these numbers are not comparable
 with the H100 ones there. The strong-scaling and contraction measurements were

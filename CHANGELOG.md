@@ -32,6 +32,18 @@ promise below.
 
 ### Changed
 
+- The flat scaling benchmark times with repeats by default.
+  `benchmark/scaling_640m/scaling_bench_flat.py` used to default to the first campaign's
+  differential protocol (two runs, wall-time difference over step difference), whose result
+  depends on the two runs writing their first frame at the same cost: three launches of one
+  point gave 7.98, 8.97 and 8.90 ms/step on one L40S, where three repeats gave 8.08, 8.08
+  and 8.07. The default is now `--repeats 3`, the protocol of the paper's series, and the
+  old one is `--differential`. `--t-a`/`--t-b` without `--differential` is an error, so that
+  a command line written for the old default is not timed the other way without saying so.
+  A run that reports no steps, or two differential runs with the same step count, stop the
+  job instead of writing a number, and the CSV carries each repeat's own step count.
+  `run_640m.sh` and `run_640m_weak.sh` keep the first campaign's protocol by name;
+  `frontier_amd/run_validation.sbatch` moves to three repeats.
 - The start of `CompressedSolver.run` needs less device memory, with identical results: the
   halo/compute overlap finds the cells that read ghost data on index sets instead of per-cell
   flag arrays (about 6 B/cell of transient memory before), and the interior mask of the

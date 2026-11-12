@@ -24,7 +24,7 @@ flat () { local n=$1; shift
     --map-by slot:PE=2 --bind-to core -x LD_LIBRARY_PATH -x SWE_FUSE_FORCINGS -x SCRATCH_BENCH -x SWE_HALO_OVERLAP \
     -x SWE_FROMDENSE_SIGMA_DUMMY -x SWE_FROMDENSE_BUILD_STAGGER \
     "$WRAP" python scaling_bench_flat.py --mode strong --direct --out "$FOUT" \
-    --t-warm 40 --t-a 150 --t-b 450 $STRONG "$@" || echo "!! flat N=$n FAILED"
+    --differential --t-warm 40 --t-a 150 --t-b 450 $STRONG "$@" || echo "!! flat N=$n FAILED"
 }
 dense () { local n=$1; shift
   echo "=== dense N=$n strong $(date +%H:%M:%S) ==="

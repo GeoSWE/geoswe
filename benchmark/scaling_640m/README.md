@@ -79,3 +79,12 @@ bash run_repeats_dense.sh    # dense weak
 bash run_repeats_strong.sh   # dense and flat, strong
 bash run_bitcheck.sh         # halo-overlap x dt-reduction digest matrix
 ```
+
+`scaling_bench_flat.py` times this way by default (`--repeats 3`): each timed run
+writes no output, and its time per step is the wall time of the step loop over
+its steps. `run_640m.sh` and `run_640m_weak.sh` pass `--differential`, the
+protocol of the first campaign: two runs of different length, wall-time
+difference over step difference. That one depends on the two runs writing
+their first frame at the same cost, and launches of one point can differ by
+more than 10 %, so use it to read that campaign's numbers and the repeats for
+new ones.

@@ -2,10 +2,20 @@
 """FLAT-tier twin of scaling_bench.py: identical synthetic uniform lake, but the
 per-rank dense Solver2D is packed via CompressedSolver.from_dense (all cells
 active = the flat-full configuration) and stepped through the production
-compressed loop. Timing = wall of a second run() call / its step count
-(first run() call is the untimed warmup that absorbs JIT).
+compressed loop.
+
+Timing: one untimed warmup run() that absorbs JIT, then --repeats timed runs (3 by
+default) of --t-time simulated seconds each, with no output written. A run's time per
+step is the wall time of its step loop, as run() reports it, over its step count.
 
   mpirun -n N python scaling_bench_flat.py --mode strong --nx 8192 --ny-total 8192 --t-warm 30 --t-time 150
+
+--differential selects the protocol of the first scaling campaign instead: two runs of
+--t-a and --t-b simulated seconds, wall-time difference over step difference. Each run
+writes frame 0 inside its window, and the difference cancels the two writes only when
+they cost the same. Three launches of one point gave 7.98, 8.97 and 8.90 ms/step (134 M
+cells on one L40S), where three repeats gave 8.08, 8.08 and 8.07. It is kept for reading
+that campaign's numbers, not for new ones.
 """
 import os, sys, time, argparse, io, re, contextlib
 os.environ.setdefault("GEOSWE_VERBOSE", "1")   # log which step kernels the run takes
@@ -55,14 +65,21 @@ ap.add_argument("--nx", type=int, default=8192)
 ap.add_argument("--ny-per-rank", type=int, default=4096)
 ap.add_argument("--ny-total", type=int, default=8192)
 ap.add_argument("--t-warm", type=float, default=30.0, help="sim seconds for the untimed warmup run")
-ap.add_argument("--t-a", type=float, default=150.0, help="sim seconds, shorter timed run")
-ap.add_argument("--t-b", type=float, default=450.0, help="sim seconds, longer timed run")
-ap.add_argument("--repeats", type=int, default=0,
-                help=">0: dense-grade timing. No frames at all (frame_every_s=0), depth-tif "
-                     "finalize disabled, one warmup run then R timed runs; ms/step = run()'s "
+ap.add_argument("--repeats", type=int, default=3,
+                help="number of timed runs after the warmup (default 3). No frames at all "
+                     "(frame_every_s=0), depth-tif finalize disabled; ms/step = run()'s "
                      "loop-internal wall (build/band setup excluded; device drained before "
                      "measure). One CSV row per repeat.")
 ap.add_argument("--t-time", type=float, default=300.0, help="sim seconds per timed repeat")
+ap.add_argument("--differential", action="store_true",
+                help="the first campaign's protocol instead of the repeats: two runs of --t-a "
+                     "and --t-b simulated seconds, wall-time difference over step difference. "
+                     "Sensitive to the cost of the frame each run writes; see the module "
+                     "docstring.")
+ap.add_argument("--t-a", type=float, default=None,
+                help="with --differential: sim seconds of the shorter timed run (default 150)")
+ap.add_argument("--t-b", type=float, default=None,
+                help="with --differential: sim seconds of the longer timed run (default 450)")
 ap.add_argument("--dtype", default="float32")
 ap.add_argument("--dx", type=float, default=30.0)
 ap.add_argument("--out", default="scaling_results_flat.csv")
@@ -76,6 +93,16 @@ ap.add_argument("--rank-weights", default="",
                      "of the same global grid proportional to those speeds instead of equal ones, "
                      "so that unequal devices finish a step together (geoswe.partition).")
 a = ap.parse_args()
+if a.differential:
+    a.t_a = 150.0 if a.t_a is None else a.t_a
+    a.t_b = 450.0 if a.t_b is None else a.t_b
+elif a.t_a is not None or a.t_b is not None:
+    # the default used to be the differential protocol: a command line written for it
+    # must not be timed the other way without saying so
+    ap.error("--t-a/--t-b belong to the differential protocol: add --differential, or time "
+             "with --repeats and --t-time")
+elif a.repeats < 1:
+    ap.error("--repeats must be at least 1 (--differential selects the two-run protocol)")
 
 NX = a.nx
 if a.mode == "weak":
@@ -186,7 +213,14 @@ OUTDIR = os.path.join(os.environ.get("SCRATCH_BENCH", "/tmp"), "flatbench_shared
 os.makedirs(os.path.join(OUTDIR, "frames_parallel"), exist_ok=True)   # every rank writes frame files here
 comm.Barrier()
 
-if a.repeats > 0:
+def _stop(msg):
+    """End the job from rank 0, the only rank that sees run()'s report: a number built
+    from a report that is not there must not reach the CSV."""
+    print(f"[scaling_640m-flat] !! {msg}", flush=True)
+    comm.Abort(1)
+
+
+if not a.differential:
     # Dense-grade single-window timing: frame_every_s=0 -> run() writes NOTHING
     # (matches the dense bench); ms/step parsed from run()'s "DONE ... steps=K in Ws"
     # line, whose wall starts AFTER build/band setup and now drains the device first.
@@ -202,12 +236,15 @@ if a.repeats > 0:
         return (int(m.group(1)), float(m.group(2))) if m else (-1, 0.0)
 
     one(a.t_warm)                                        # untimed warmup (JIT + halo plans)
-    ms_all, st_r, win_t = [], -1, []
+    ms_all, st_all, st_r, win_t = [], [], -1, []
     for r in range(a.repeats):
         _tw0 = time.time()
         st_r, w_r = one(a.t_time)
         win_t.append((_tw0, time.time()))
-        ms_all.append(w_r / max(st_r, 1) * 1000.0)
+        if rank == 0 and (st_r <= 0 or w_r <= 0.0):
+            _stop(f"repeat {r}: run() reported steps={st_r} in {w_r}s; nothing to time "
+                  f"(is --t-time {a.t_time} long enough for one step?)")
+        ms_all.append(w_r / max(st_r, 1) * 1000.0); st_all.append(st_r)
         if rank == 0:
             print(f"[scaling_640m-flat] mode={a.mode} N={N:2d} rep={r} ms/step={ms_all[-1]:8.3f} "
                   f"steps={st_r} total={NX*NY_glob/1e9:6.3f}B per-rank={CELLS_RANK/1e6:6.1f}M", flush=True)
@@ -250,8 +287,8 @@ if a.repeats > 0:
         new = not os.path.exists(a.out)
         with open(a.out, "a") as f:
             if new: f.write("tier,mode,N,ms_per_step,steps,cells_total,cells_per_rank,gpu_mib_max\n")
-            for msv in ms_all:
-                f.write(f"flat-full,{a.mode},{N},{msv:.4f},{st_r},{NX*NY_glob},{CELLS_RANK},{gmib:.0f}\n")
+            for msv, stv in zip(ms_all, st_all):     # each repeat's own step count
+                f.write(f"flat-full,{a.mode},{N},{msv:.4f},{stv},{NX*NY_glob},{CELLS_RANK},{gmib:.0f}\n")
     sys.exit(0)
 
 def steps_of(t_end):
@@ -275,8 +312,11 @@ def steps_of(t_end):
 st_w, _ = steps_of(a.t_warm)                    # warmup: JIT + halo plans
 sA, wA = steps_of(a.t_a)
 sB, wB = steps_of(a.t_b)
-ms = (wB - wA) / max(sB - sA, 1) * 1000.0
-st_t = sB - sA
+if rank == 0 and sB <= sA:
+    _stop(f"--differential: the runs of {a.t_a} and {a.t_b} simulated seconds took {sA} and "
+          f"{sB} steps; the longer one has to take more for a step difference to exist")
+st_t = max(sB - sA, 1)             # ranks other than 0 see no report; only rank 0's value is used
+ms = (wB - wA) / st_t * 1000.0
 cells_loc, cells_tot = CELLS_RANK, NX*NY_glob
 gmib = comm.reduce(cp.get_default_memory_pool().used_bytes()/1048576.0, op=MPI.MAX, root=0)
 if rank == 0:

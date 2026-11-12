@@ -106,11 +106,11 @@ if [[ " $STAGES " == *" scaling "* ]]; then
           --nx 8192 --ny-per-rank "$NY_PER_RANK" --nsteps 200 --warmup 20 \
           --out "$RUN/dense_weak_aware$ca.csv" 2>&1 | grep -E "\[scaling\]|rror|Warning" \
           | sed "s/^/gpu-aware=$ca dense /" || rc=1
-      # differential timing, as the paper's launcher: runs of 150 and 600 simulated seconds,
-      # wall-time difference over step difference
+      # three timed runs of 300 simulated seconds after the warmup: the wall time of the
+      # step loop over its steps, with no output written (the summary below takes the best)
       SWE_HALO_CUDA_AWARE=$ca launch $n python benchmark/scaling_640m/scaling_bench_flat.py --mode weak \
-          --nx 8192 --ny-per-rank "$NY_PER_RANK" --t-warm 30 --t-a 150 --t-b 600 \
-          --out "$RUN/flat_weak_aware$ca.csv" 2>&1 | grep -E "ms/step|rror|Warning" \
+          --nx 8192 --ny-per-rank "$NY_PER_RANK" --t-warm 30 --repeats 3 --t-time 300 \
+          --out "$RUN/flat_weak_aware$ca.csv" 2>&1 | grep -E "ms/step|REPEATS|rror|Warning|!!" \
           | sed "s/^/gpu-aware=$ca /" || rc=1
     done
   done
