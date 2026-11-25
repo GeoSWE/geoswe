@@ -51,6 +51,12 @@ promise below.
   rank: 41 B/cell in the flat weak-scaling benchmark with the switches above, now 39 (1.6 billion
   cells on one GCD, one rank or many).
 
+- The workflows use the Node.js 24 releases of their actions: `actions/checkout@v7`,
+  `actions/setup-python@v7`, `actions/upload-pages-artifact@v5`, `actions/deploy-pages@v5`,
+  `actions/upload-artifact@v7`, `actions/download-artifact@v8`, and `astral-sh/ruff-action` at
+  the v4.1.0 commit (it publishes no moving `v4` tag). GitHub was running the Node.js 20 ones on
+  Node.js 24 already, with a deprecation warning on every run.
+
 ### Fixed
 
 - `SWE_HALO_CUDA_AWARE=1` on an MPI library without GPU support ended in a segmentation

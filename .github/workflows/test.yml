@@ -15,8 +15,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.10", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip
@@ -38,8 +38,8 @@ jobs:
     name: CPU with the GIS and forcings extras
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
@@ -73,8 +73,8 @@ jobs:
     # starts at CUDA 13.3, and the install of 12.6.3 below fails there (apt exit 100).
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # nvcc alone, which is a ~200 MB install instead of the whole toolkit;
@@ -99,8 +99,8 @@ jobs:
     name: CPU examples
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install -e ".[examples]"   # the declared extra, so CI exercises what users install
