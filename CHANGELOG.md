@@ -74,6 +74,14 @@ promise below.
   300 s, and the failure says what to check.
 - Three tests of the MRMS reader skipped in every CI job, because no job installed xarray.
   The job with the extras installs it.
+- A dense GPU step synchronised the device with the host on every step. The friction checks
+  tested the velocity cap with `np.isfinite(vcap)`, and `np` in `solver.py` is the array
+  backend, so on a GPU the test of a host float ran a kernel and read its answer back. The host
+  could then not queue the next step while the GPU worked: on an MI355X a fixed-dt step took
+  0.233 ms at 1 M cells and 0.117 ms without the sync, 0.869 and 0.723 ms at 16.8 M cells.
+  Results are unchanged. `tests/test_gpu_dense_no_host_sync.py` records fixed-dt steps as a
+  stream-captured graph, which any synchronisation inside `step()` makes fail, and requires
+  the replay to give the bytes of the steps launched one by one.
 
 ## [1.1.1] - 2026-10-06
 

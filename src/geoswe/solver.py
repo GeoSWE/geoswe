@@ -2330,7 +2330,9 @@ class Solver2D:
         if cfg.time != "euler" or cfg.friction != "manning_implicit":
             return False
         vcap = getattr(cfg, "friction_velocity_cap_ms", 15.0)
-        if not (_USING_CUPY and self.q.dtype == np.float32 and np.isfinite(vcap)):
+        # _hostnp, not np: vcap is a host float, and np here is the array backend, so on a GPU the
+        # backend's isfinite ran a kernel and read its answer back, a device sync on every step
+        if not (_USING_CUPY and self.q.dtype == np.float32 and _hostnp.isfinite(vcap)):
             return False
         have_mtab = self._manning_cls is not None
         return bool(have_mtab or (cfg.manning_field is not None
@@ -2845,7 +2847,7 @@ class Solver2D:
             # place of a dense manning_field. Either source enables the fused path.
             _have_mtab = self._manning_cls is not None
             _fused_friction = (
-                _USING_CUPY and self.q.dtype == np.float32 and np.isfinite(vcap)
+                _USING_CUPY and self.q.dtype == np.float32 and _hostnp.isfinite(vcap)
                 and (_have_mtab
                      or (cfg.manning_field is not None
                          and cfg.manning_field.dtype == np.float32))
@@ -2861,7 +2863,7 @@ class Solver2D:
                     and cfg.manning_field is not None
                     and self.q.dtype == np.float32
                     and cfg.manning_field.dtype == np.float32
-                    and not np.isfinite(vcap)
+                    and not _hostnp.isfinite(vcap)
                     and not getattr(self, "_friction_vcap_inf_warned", False)):
                 import warnings
                 warnings.warn(
@@ -2926,7 +2928,7 @@ class Solver2D:
                     n_field = cfg.manning_field[interior[0], interior[1]]
                 else:
                     n_field = cfg.manning_n
-                if np.isfinite(vcap):
+                if _hostnp.isfinite(vcap):
                     n_cri = np.sqrt(1.0 / ((1.0e-10 + dt) * cfg.g * h ** (-4.0 / 3.0)
                                              * (modU + 1.0e-30)))
                     n_field = np.where(modU > vcap, np.maximum(n_field, n_cri), n_field)
