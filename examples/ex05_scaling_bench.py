@@ -27,11 +27,10 @@ except ImportError:
              'NVIDIA or `pip install "geoswe[gpu-rocm,mpi]"` on AMD, and launch it under mpirun.\n'
              'Examples 1 to 4 and 7 run on the CPU.')
 
-from geoswe import Mesh2D, Solver2D, Config
-
 comm = MPI.COMM_WORLD
 rank, N = comm.rank, comm.size
 cp.cuda.Device(rank % cp.cuda.runtime.getDeviceCount()).use()
+from geoswe import Mesh2D, Solver2D, Config   # after the GPU is pinned: importing geoswe starts CUDA
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--mode", choices=["weak", "strong"], default="weak")

@@ -29,10 +29,10 @@ mpi4py.rc.thread_level = "funneled"   # before MPI starts: GeoSWE calls MPI from
 from mpi4py import MPI
 import numpy as np
 import cupy as cp
-from geoswe import Mesh2D, Config, Solver2D
 
 comm = MPI.COMM_WORLD
 cp.cuda.Device(comm.rank % cp.cuda.runtime.getDeviceCount()).use()   # pin a GPU
+from geoswe import Mesh2D, Config, Solver2D   # after the GPU is pinned
 
 NX, NY_GLOBAL, dx = 2000, 2000, 10.0        # NY_GLOBAL must divide by the rank count
 NY_LOCAL = NY_GLOBAL // comm.size
@@ -55,6 +55,10 @@ s.step(dt=float(s.cfl_dt()))         # cfl_dt() does the global all-reduce
   paths. It has to come before `from mpi4py import MPI`, which starts MPI;
   `MPI4PY_RC_THREAD_LEVEL=funneled` in every rank's environment, or
   `python -m mpi4py -rc thread_level=funneled`, does the same from outside the script.
+- **Pin the GPU before importing `geoswe`.** With the GPU backend, `import geoswe`
+  starts CUDA on the current device. A rank that imports it before pinning keeps a
+  context on the first visible GPU as well as on its own, about 0.4 GB each, so with
+  eight ranks the first GPU carries seven contexts that do no work.
 - **`dims=[Px, Py]`** sets the process grid; `[1, N]` is a 1-D split in $y$.
   Pass `None` to let MPI choose.
 - **`cfl_dt()`** performs a global all-reduce so every rank advances with the

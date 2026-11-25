@@ -69,6 +69,12 @@ promise below.
 
 ### Fixed
 
+- The multi-GPU example in `docs/multigpu_mpi.md` and `examples/ex05_scaling_bench.py` imported
+  `geoswe` before pinning the rank's GPU. With the GPU backend `import geoswe` starts CUDA on the
+  current device, so every rank but the first kept a context of about 0.4 GB on the first visible
+  GPU besides its own (two ranks on two L40S: three contexts, 424 MiB extra). Both now pin first,
+  as the replay launchers in `docs/cache_replay.md` and `docs/checkpointing.md` already did, and
+  the page says why. The example's results are unchanged, byte for byte.
 - `SWE_HALO_CUDA_AWARE=1` on an MPI library without GPU support ended in a segmentation
   fault in every rank instead of the documented fallback to host staging. The probe asked
   through `MPI.Query_cuda_support`, which mpi4py does not have, so it always trusted the
