@@ -32,6 +32,16 @@ promise below.
 
 ### Changed
 
+- The documented MPI launchers and `examples/ex05_scaling_bench.py` start MPI at
+  `MPI_THREAD_FUNNELED` instead of mpi4py's default, `MPI_THREAD_MULTIPLE`: they set
+  `mpi4py.rc.thread_level = "funneled"` before `from mpi4py import MPI`. GeoSWE calls MPI only
+  from the main thread (the checkpoint and snapshot writer threads do file I/O only), and at
+  `MPI_THREAD_MULTIPLE` the MPI library locks around its calls and may take other progress
+  paths. The package does not set the level itself: in every documented use the caller's
+  script starts MPI before GeoSWE does, and `import geoswe` stays free of mpi4py.
+  `docs/multigpu_mpi.md` says why and gives the two ways to set it from outside a script
+  (`MPI4PY_RC_THREAD_LEVEL`, `python -m mpi4py -rc thread_level=funneled`). The benchmark
+  scripts keep mpi4py's default, the setting of the paper's measurements. Results are unchanged.
 - The flat scaling benchmark times with repeats by default.
   `benchmark/scaling_640m/scaling_bench_flat.py` used to default to the first campaign's
   differential protocol (two runs, wall-time difference over step difference), whose result

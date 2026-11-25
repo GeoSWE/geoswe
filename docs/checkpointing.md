@@ -160,6 +160,8 @@ entry point is a few lines of your own around
 
 ```python
 # replay_launcher.py
+import mpi4py
+mpi4py.rc.thread_level = "funneled"   # before MPI starts: GeoSWE calls MPI from one thread
 from mpi4py import MPI
 import cupy as cp
 

@@ -76,6 +76,8 @@ cache rather than indexing past the end of a table.
 
 ```python
 # run_cache.py: load the cache straight to the GPU and step it
+import mpi4py
+mpi4py.rc.thread_level = "funneled"   # before MPI starts: GeoSWE calls MPI from one thread
 from mpi4py import MPI
 import cupy as cp
 

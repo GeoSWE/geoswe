@@ -18,6 +18,8 @@ Requires CuPy and mpi4py (`pip install "geoswe[gpu,mpi]"`). One GPU/rank.
 import os, sys, time, argparse
 import numpy as np
 try:
+    import mpi4py
+    mpi4py.rc.thread_level = "funneled"   # before MPI starts: GeoSWE calls MPI from one thread
     from mpi4py import MPI
     import cupy as cp
 except ImportError:

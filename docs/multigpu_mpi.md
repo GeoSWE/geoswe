@@ -24,6 +24,8 @@ pinning line in the script below then sees one device per rank and is a no-op.
 In the script, pass the communicator and a process grid to the solver:
 
 ```python
+import mpi4py
+mpi4py.rc.thread_level = "funneled"   # before MPI starts: GeoSWE calls MPI from one thread
 from mpi4py import MPI
 import numpy as np
 import cupy as cp
@@ -46,6 +48,13 @@ s = Solver2D(mesh, cfg, q0_local, bed_local, comm=comm, dims=[1, comm.size])
 s.step(dt=float(s.cfl_dt()))         # cfl_dt() does the global all-reduce
 ```
 
+- **`mpi4py.rc.thread_level = "funneled"`** asks MPI for `MPI_THREAD_FUNNELED` instead
+  of mpi4py's default, `MPI_THREAD_MULTIPLE`. GeoSWE calls MPI from one thread only (its
+  checkpoint and snapshot writers do file I/O), so it needs no more, and at
+  `MPI_THREAD_MULTIPLE` the MPI library locks around its calls and may take other progress
+  paths. It has to come before `from mpi4py import MPI`, which starts MPI;
+  `MPI4PY_RC_THREAD_LEVEL=funneled` in every rank's environment, or
+  `python -m mpi4py -rc thread_level=funneled`, does the same from outside the script.
 - **`dims=[Px, Py]`** sets the process grid; `[1, N]` is a 1-D split in $y$.
   Pass `None` to let MPI choose.
 - **`cfl_dt()`** performs a global all-reduce so every rank advances with the
